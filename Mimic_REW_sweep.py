@@ -56,7 +56,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # ═══════════════════════════════════════════════════════════════════════════
 #  CONFIGURATION DEFAULTS
 # ═══════════════════════════════════════════════════════════════════════════
-SWEEP_START_HZ   = 20
+SWEEP_START_HZ   = 0
 SWEEP_END_HZ     = 20_000
 SWEEP_DURATION_S = 10          # REW default: 256k samples @ 48kHz ≈ 5.3 s; 10s gives more SNR
 SWEEP_LEVEL_DBFS = -12
