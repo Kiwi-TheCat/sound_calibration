@@ -286,7 +286,7 @@ class REWSweepAnalyzer:
     def plot_comparison(self, measured_freq: np.ndarray, measured_spl: np.ndarray,
                        sample_freqs_list: List[np.ndarray], sample_spls_list: List[np.ndarray],
                        smoothing_type: Optional[str] = None):
-        """Plot measured SPL vs averaged sample data"""
+        """Plot measured SPL vs sample data"""
         
         # Apply smoothing if requested
         if smoothing_type and smoothing_type.lower() != 'none':
@@ -298,41 +298,15 @@ class REWSweepAnalyzer:
             sample_spls_list = [self.apply_octave_smoothing(f, s, smoothing_type)[1] 
                                for f, s in zip(sample_freqs_list, sample_spls_list)]
         
-        # Average sample data
-        if sample_spls_list:
-            # Interpolate all samples to common frequency grid
-            from scipy.interpolate import interp1d
-            common_freqs = np.logspace(np.log10(20), np.log10(20000), 1000)
-            
-            averaged_spl = None
-            for freq, spl in zip(sample_freqs_list, sample_spls_list):
-                if len(freq) > 1:
-                    func = interp1d(freq, spl, kind='linear', 
-                                   bounds_error=False, fill_value='extrapolate')
-                    interp_spl = func(common_freqs)
-                    if averaged_spl is None:
-                        averaged_spl = interp_spl
-                    else:
-                        averaged_spl += interp_spl
-            
-            if averaged_spl is not None:
-                averaged_spl /= len(sample_spls_list)
-                sample_freq = common_freqs
-            else:
-                sample_freq = None
-        else:
-            sample_freq = None
-        
         # Create plot
         plt.figure(figsize=(14, 8))
         plt.semilogx(measured_freq, measured_spl, 'b-', linewidth=2, label='Measured')
         
-        if sample_freq is not None and averaged_spl is not None:
-            plt.semilogx(sample_freq, averaged_spl, 'r--', linewidth=2, label='Average Sample')
-            
-            # Plot individual samples lightly
+        # Plot sample data
+        if sample_spls_list:
             for i, (freq, spl) in enumerate(zip(sample_freqs_list, sample_spls_list)):
-                plt.semilogx(freq, spl, 'g:', alpha=0.3, linewidth=1)
+                if len(freq) > 1:
+                    plt.semilogx(freq, spl, 'r--', linewidth=2, label=f'Sample Data', alpha=0.7)
         
         plt.xlabel('Frequency (Hz)', fontsize=12)
         plt.ylabel('SPL (dB)', fontsize=12)
@@ -374,12 +348,12 @@ def main():
     # Step 1b: Play sweep signal
     print("\nStep 1b: Playing sweep signal...")
     print("(Make sure speakers/headphones are on and microphone is ready to record the response)")
-    analyzer.play_sweep(sweep)
+    analyzer.play_sweep(sweep, device=2)
     
     # Step 2: Record/capture response
     print("\nStep 2: Recording sweep response...")
     print("(Recording now - the response will be captured from the microphone)")
-    recorded = analyzer.record_sweep()
+    recorded = analyzer.record_sweep(device=0)
     print(f"Recorded: {len(recorded)} samples")
     
     # Step 3: Save raw wav data
@@ -414,7 +388,9 @@ def main():
     sample_freqs_list = []
     sample_spls_list = []
     
-    for sample_file in sample_files[:3]:  # Take first 3 samples
+    # Load only the first sample file
+    if sample_files:
+        sample_file = sample_files[0]
         print(f"  Loading: {sample_file.name}")
         data = analyzer.load_rew_mdata(sample_file.name, "REW Standard Data" if rew_data_dir.exists() else ".")
         if data is not None:
@@ -422,13 +398,19 @@ def main():
                 if 'frequencies' in data and 'spl' in data:
                     sample_freqs_list.append(data['frequencies'])
                     sample_spls_list.append(data['spl'])
+                    print(f"  Successfully loaded {sample_file.name}")
             else:
                 print(f"    Warning: Could not parse {sample_file.name}")
+        else:
+            print(f"    Error: Could not load {sample_file.name}")
     
     if sample_files:
-        print(f"Found {len(sample_files)} sample files, loaded {len(sample_spls_list)} successfully")
+        print(f"Found {len(sample_files)} sample files available")
     else:
         print("No sample files found. Check 'data/REW Standard Data/' directory.")
+    
+    if not sample_spls_list:
+        print("Warning: No sample data loaded. Will show measured data only.")
     
     # Step 8: Ask about smoothing
     print("\nStep 8: Applying smoothing (optional)...")
