@@ -58,7 +58,24 @@ class REWSweepAnalyzer:
         
         return sweep
     
-    def list_audio_devices(self) -> None:\n        \"\"\"List available audio devices\"\"\"\n        print(\"\\nAvailable Audio Devices:\")\n        try:\n            devices = sd.query_devices()\n            for i, device in enumerate(devices):\n                print(f\"  [{i}] {device['name']}\")\n                print(f\"       Channels: {device['max_input_channels']} in, {device['max_output_channels']} out\")\n            print()\n            default_input = sd.default.device[0]\n            default_output = sd.default.device[1]\n            print(f\"  Default input device: {default_input}\")\n            print(f\"  Default output device: {default_output}\")\n        except Exception as e:\n            print(f\"Could not query audio devices: {e}\")\n    \n    def play_sweep(self, audio_data: np.ndarray, device: Optional[int] = None) -> None:
+    
+    def list_audio_devices(self) -> None:
+        """List available audio devices"""
+        print("\nAvailable Audio Devices:")
+        try:
+            devices = sd.query_devices()
+            for i, device in enumerate(devices):
+                print(f"  [{i}] {device['name']}")
+                print(f"       Channels: {device['max_input_channels']} in, {device['max_output_channels']} out")
+            print()
+            default_input = sd.default.device[0]
+            default_output = sd.default.device[1]
+            print(f"  Default input device: {default_input}")
+            print(f"  Default output device: {default_output}")
+        except Exception as e:
+            print(f"Could not query audio devices: {e}")
+    
+    def play_sweep(self, audio_data: np.ndarray, device: Optional[int] = None) -> None:
         """Play a sweep signal through audio output device"""
         print(f"Playing sweep through audio device...")
         try:
