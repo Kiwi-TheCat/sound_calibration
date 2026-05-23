@@ -47,7 +47,7 @@ class REWSweepAnalyzer:
         sweep = chirp(t, f0=start_freq, f1=self.END_FREQ, t1=duration, method='logarithmic')
         
         # Apply windowing to avoid clicks (gentle fade in/out)
-        window = get_window('tukey', len(sweep), alpha=0.05)
+        window = get_window(('tukey', 0.05), len(sweep))
         sweep = sweep * window
         
         # Normalize to target level in dBFS
