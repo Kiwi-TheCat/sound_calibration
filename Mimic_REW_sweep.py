@@ -58,6 +58,17 @@ class REWSweepAnalyzer:
         
         return sweep
     
+    def list_audio_devices(self) -> None:\n        \"\"\"List available audio devices\"\"\"\n        print(\"\\nAvailable Audio Devices:\")\n        try:\n            devices = sd.query_devices()\n            for i, device in enumerate(devices):\n                print(f\"  [{i}] {device['name']}\")\n                print(f\"       Channels: {device['max_input_channels']} in, {device['max_output_channels']} out\")\n            print()\n            default_input = sd.default.device[0]\n            default_output = sd.default.device[1]\n            print(f\"  Default input device: {default_input}\")\n            print(f\"  Default output device: {default_output}\")\n        except Exception as e:\n            print(f\"Could not query audio devices: {e}\")\n    \n    def play_sweep(self, audio_data: np.ndarray, device: Optional[int] = None) -> None:
+        """Play a sweep signal through audio output device"""
+        print(f"Playing sweep through audio device...")
+        try:
+            sd.play(audio_data, samplerate=self.SAMPLE_RATE, device=device)
+            sd.wait()
+            print("Playback complete.")
+        except Exception as e:
+            print(f"Error during playback: {e}")
+            print("Could not play audio. Ensure audio device is configured.")
+    
     def record_sweep(self, duration: Optional[float] = None, device: Optional[int] = None) -> np.ndarray:
         """Record a sweep signal (capture system response)"""
         if duration is None:
@@ -206,9 +217,12 @@ class REWSweepAnalyzer:
         
         return np.array(smoothed_freqs), np.array(smoothed_mags)
     
-    def load_rew_mdata(self, mdata_file: str) -> Optional[Dict]:
-        """Load REW .mdata file (binary format used by REW)"""
-        mdata_path = self.data_dir / mdata_file
+    def load_rew_mdata(self, mdata_file: str, subdirectory: str = "REW Standard Data") -> Optional[Dict]:
+        """Load REW .mdata/.mdat file (binary format used by REW)"""
+        # Try in subdirectory first, then main data dir
+        mdata_path = self.data_dir / subdirectory / mdata_file
+        if not mdata_path.exists():
+            mdata_path = self.data_dir / mdata_file
         
         try:
             # REW .mdata files are binary files with frequency response data
@@ -332,14 +346,22 @@ def main():
     print(f"Level: {analyzer.LEVEL_DBFS} dBFS")
     print()
     
+    # List audio devices
+    analyzer.list_audio_devices()
+    
     # Step 1: Generate sweep
     print("Step 1: Generating sweep signal...")
     sweep = analyzer.generate_sweep()
     print(f"Generated sweep: {len(sweep)} samples, duration: {len(sweep)/analyzer.SAMPLE_RATE:.3f}s")
     
+    # Step 1b: Play sweep signal
+    print("\nStep 1b: Playing sweep signal...")
+    print("(Make sure speakers/headphones are on and microphone is ready to record the response)")
+    analyzer.play_sweep(sweep)
+    
     # Step 2: Record/capture response
     print("\nStep 2: Recording sweep response...")
-    print("(Note: Configure your audio device and ensure microphone is positioned correctly)")
+    print("(Recording now - the response will be captured from the microphone)")
     recorded = analyzer.record_sweep()
     print(f"Recorded: {len(recorded)} samples")
     
@@ -360,15 +382,24 @@ def main():
     measured_spl = analyzer.apply_calibration(measured_freq, measured_db, calibration)
     measured_spl = analyzer.convert_to_spl(measured_spl)
     
-    # Step 7: Load sample data from .mdata files
-    print("\nStep 7: Loading REW sample data (.mdata files)...")
-    sample_files = [f for f in analyzer.data_dir.glob("*.mdata")]
+    # Step 7: Load sample data from .mdata/.mdat files
+    print("\nStep 7: Loading REW sample data (.mdata/.mdat files)...")
+    
+    # Look for .mdat or .mdata files in REW Standard Data subdirectory
+    rew_data_dir = analyzer.data_dir / "REW Standard Data"
+    sample_files = []
+    if rew_data_dir.exists():
+        sample_files = list(rew_data_dir.glob("*.mdat")) + list(rew_data_dir.glob("*.mdata"))
+    else:
+        # Fallback to main data directory
+        sample_files = list(analyzer.data_dir.glob("*.mdat")) + list(analyzer.data_dir.glob("*.mdata"))
+    
     sample_freqs_list = []
     sample_spls_list = []
     
     for sample_file in sample_files[:3]:  # Take first 3 samples
         print(f"  Loading: {sample_file.name}")
-        data = analyzer.load_rew_mdata(sample_file.name)
+        data = analyzer.load_rew_mdata(sample_file.name, "REW Standard Data" if rew_data_dir.exists() else ".")
         if data is not None:
             if isinstance(data, dict):
                 if 'frequencies' in data and 'spl' in data:
@@ -377,7 +408,10 @@ def main():
             else:
                 print(f"    Warning: Could not parse {sample_file.name}")
     
-    print(f"Loaded {len(sample_spls_list)} sample files")
+    if sample_files:
+        print(f"Found {len(sample_files)} sample files, loaded {len(sample_spls_list)} successfully")
+    else:
+        print("No sample files found. Check 'data/REW Standard Data/' directory.")
     
     # Step 8: Ask about smoothing
     print("\nStep 8: Applying smoothing (optional)...")
