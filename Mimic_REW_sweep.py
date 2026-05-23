@@ -77,7 +77,14 @@ class REWSweepAnalyzer:
     
     def play_sweep(self, audio_data: np.ndarray, device: Optional[int] = None) -> None:
         """Play a sweep signal through audio output device"""
-        print(f"Playing sweep through audio device...")
+        if device is None:
+            device_name = f"Default output device [{sd.default.device[1]}]"
+        else:
+            try:
+                device_name = f"Device {device}: {sd.query_devices(device)['name']}"
+            except:
+                device_name = f"Device {device}"
+        print(f"Playing sweep through {device_name}...")
         try:
             sd.play(audio_data, samplerate=self.SAMPLE_RATE, device=device)
             sd.wait()
@@ -91,7 +98,15 @@ class REWSweepAnalyzer:
         if duration is None:
             duration = self.LENGTH_SAMPLES / self.SAMPLE_RATE + self.START_DELAY + 1.0
         
+        if device is None:
+            device_name = f"Default input device [{sd.default.device[0]}]"
+        else:
+            try:
+                device_name = f"Device {device}: {sd.query_devices(device)['name']}"
+            except:
+                device_name = f"Device {device}"
         print(f"Recording sweep for {duration:.2f} seconds...")
+        print(f"Using {device_name}")
         print(f"Sample rate: {self.SAMPLE_RATE} Hz")
         
         try:
@@ -242,45 +257,113 @@ class REWSweepAnalyzer:
             mdata_path = self.data_dir / mdata_file
         
         try:
-            # REW .mdata files are binary files with frequency response data
-            # Try to read as pickle first (common in older REW versions)
+            with open(mdata_path, 'rb') as f:
+                content = f.read()
+            
+            # Strategy 1: Try to read as pickle
             try:
-                with open(mdata_path, 'rb') as f:
-                    data = pickle.load(f)
+                import io
+                data = pickle.load(io.BytesIO(content))
+                if isinstance(data, dict) and ('frequencies' in data or 'freq' in data):
+                    print(f"    Loaded as pickle format")
+                    # Normalize keys
+                    if 'freq' in data and 'frequencies' not in data:
+                        data['frequencies'] = data.pop('freq')
+                    if 'spl' not in data and 'magnitude' in data:
+                        data['spl'] = data.pop('magnitude')
                     return data
-            except:
-                # Try reading as structured binary data
-                with open(mdata_path, 'rb') as f:
-                    content = f.read()
-                
-                # Try to parse as text if it contains readable data
+            except Exception as e:
+                pass
+            
+            # Strategy 2: REW exports often have readable text sections
+            # Try decoding with different encodings
+            for encoding in ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']:
                 try:
-                    text_content = content.decode('utf-8', errors='ignore')
-                    # Parse if it looks like text data
-                    if 'freq' in text_content.lower() or 'spl' in text_content.lower():
-                        lines = text_content.split('\n')
-                        freqs = []
-                        spls = []
-                        for line in lines:
-                            parts = line.split()
-                            if len(parts) >= 2:
-                                try:
-                                    f = float(parts[0])
-                                    s = float(parts[1])
-                                    freqs.append(f)
-                                    spls.append(s)
-                                except:
-                                    continue
-                        if freqs:
-                            return {'frequencies': np.array(freqs), 'spl': np.array(spls)}
-                except:
+                    text_content = content.decode(encoding, errors='ignore')
+                    
+                    # Split into lines and look for data
+                    lines = text_content.split('\n')
+                    freqs = []
+                    spls = []
+                    
+                    # Look for numeric patterns in each line
+                    import re
+                    for line in lines:
+                        line = line.strip()
+                        if not line or len(line) > 1000:  # Skip empty or very long lines
+                            continue
+                        
+                        # Match lines with two floating-point numbers
+                        matches = re.findall(r'([\d.eE+-]+)\s+([-\d.eE+-]+)', line)
+                        for match in matches:
+                            try:
+                                freq = float(match[0])
+                                spl = float(match[1])
+                                
+                                # Sanity checks for frequency response data
+                                # Frequency: 10 Hz to 100 kHz
+                                # SPL: typically -100 to +100 dB
+                                if 10 < freq < 100000 and -150 < spl < 150:
+                                    freqs.append(freq)
+                                    spls.append(spl)
+                            except:
+                                pass
+                    
+                    # Clean up duplicates and sort by frequency
+                    if freqs:
+                        # Remove consecutive duplicates
+                        freqs_sorted = []
+                        spls_sorted = []
+                        prev_freq = None
+                        for f, s in sorted(zip(freqs, spls)):
+                            if prev_freq is None or abs(f - prev_freq) > 0.1:
+                                freqs_sorted.append(f)
+                                spls_sorted.append(s)
+                                prev_freq = f
+                        
+                        if len(freqs_sorted) > 10:  # Need enough points to be meaningful
+                            print(f"    Loaded {len(freqs_sorted)} frequency points using {encoding} encoding")
+                            return {'frequencies': np.array(freqs_sorted), 'spl': np.array(spls_sorted)}
+                except Exception as e:
                     pass
+            
+            # Strategy 3: Try extracting floating point sequences from binary
+            try:
+                import struct
+                freqs = []
+                spls = []
                 
-                # If all else fails, return None
-                return None
+                # Look for patterns of 4-byte floats
+                for i in range(0, len(content) - 8, 4):
+                    try:
+                        val1 = struct.unpack('<f', content[i:i+4])[0]
+                        val2 = struct.unpack('<f', content[i+4:i+8])[0]
+                        
+                        # Check if this looks like freq/spl pair
+                        if 10 < val1 < 100000 and -150 < val2 < 150:
+                            freqs.append(val1)
+                            spls.append(val2)
+                    except:
+                        pass
+                
+                if freqs and len(freqs) > 10:
+                    # Sort by frequency
+                    sorted_data = sorted(zip(freqs, spls))
+                    freqs = np.array([x[0] for x in sorted_data])
+                    spls = np.array([x[1] for x in sorted_data])
+                    print(f"    Loaded {len(freqs)} frequency points using binary float extraction")
+                    return {'frequencies': freqs, 'spl': spls}
+            except Exception as e:
+                pass
+            
+            print(f"    Warning: Could not parse data from {mdata_path}")
+            return None
                 
         except FileNotFoundError:
             print(f"File not found: {mdata_path}")
+            return None
+        except Exception as e:
+            print(f"Error loading {mdata_path}: {e}")
             return None
     
     def plot_comparison(self, measured_freq: np.ndarray, measured_spl: np.ndarray,
@@ -348,12 +431,12 @@ def main():
     # Step 1b: Play sweep signal
     print("\nStep 1b: Playing sweep signal...")
     print("(Make sure speakers/headphones are on and microphone is ready to record the response)")
-    analyzer.play_sweep(sweep, device=2)
+    analyzer.play_sweep(sweep)
     
     # Step 2: Record/capture response
     print("\nStep 2: Recording sweep response...")
     print("(Recording now - the response will be captured from the microphone)")
-    recorded = analyzer.record_sweep(device=0)
+    recorded = analyzer.record_sweep()
     print(f"Recorded: {len(recorded)} samples")
     
     # Step 3: Save raw wav data
