@@ -56,24 +56,36 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # ═══════════════════════════════════════════════════════════════════════════
 #  CONFIGURATION DEFAULTS
 # ═══════════════════════════════════════════════════════════════════════════
-SWEEP_START_HZ   = 1
+SWEEP_START_HZ   = 1           # Match REW "Start Freq: 0 Hz" (1 Hz avoids log(0))
 SWEEP_END_HZ     = 20_000
-SWEEP_DURATION_S = 10          # REW default: 256k samples @ 48kHz ≈ 5.3 s; 10s gives more SNR
-SWEEP_LEVEL_DBFS = -12
+# REW default sweep length is 256k samples @ 48 kHz = 5.333... s
+# Using the exact same sample count (not a rounded duration) ensures the
+# inverse filter energy normalisation is identical to REW's.
+SWEEP_SAMPLES    = 256_000
 SAMPLE_RATE      = 48_000
-SILENCE_PRE_S    = 0.5
-SILENCE_POST_S   = 1.5         # extra tail for late reflections
+SWEEP_DURATION_S = SWEEP_SAMPLES / SAMPLE_RATE   # = 5.3333... s exactly
+SWEEP_LEVEL_DBFS = -12
+SILENCE_PRE_S    = 1.0         # Match REW "Start delay: 1 s"
+SILENCE_POST_S   = 1.5
 OUTPUT_WAV       = "mimic_sweep_1.wav"
 PLOT_FILENAME    = "rew_analysis.png"
 CSV_FILENAME     = "rew_analysis.csv"
 DEFAULT_DATA_DIR = "data"
 
-# IR time window (seconds) — REW uses a similar half-Hann gating strategy
-IR_FADE_IN_S   = 0.002         # 2 ms pre-peak fade-in
-IR_GATE_S      = 0.200         # gate length after peak (200 ms captures room modes)
+# IR time window — gate long enough for 2 Hz frequency resolution (1/0.5 s)
+IR_FADE_IN_S   = 0.002
+IR_GATE_S      = 0.500
 
-PLOT_FMIN = 2
+PLOT_FMIN = 1
 PLOT_FMAX = 24_000
+
+# ── Absolute SPL offset ──────────────────────────────────────────────────
+# REW stores absolute dBSPL in .mdat files.  Our deconvolution outputs dBFS
+# (relative to playback level).  The gap is:
+#   offset_dB = mic_sensitivity_dBFS_at_94dBSPL + 94 + soundcard_output_gain
+# Set --spl-offset to a numeric value to shift the measured curve, or leave
+# as "auto" to have the script compute it from the loaded reference files.
+SPL_OFFSET_DEFAULT = "auto"
 
 SMOOTHING_MAP = {
     "none": None,
@@ -129,19 +141,25 @@ def generate_ess(
     sweep = (sweep / np.max(np.abs(sweep))) * amplitude
 
     # ── Analytical inverse filter (Farina eq. 10) ───────────────────────
-    # h_inv(t) = x(T−t) / (f1 · 2π L · ln(f2/f1))  ×  e^(−t·ln(f2/f1)/T)
+    # h_inv(t) = x(T−t) × e^(−t · ln(f2/f1) / T)
     #
-    # The e^(−t/L) term compensates for the ESS's −3 dB/octave power spectrum
-    # so that convolution with the ESS gives a flat (delta) response for an
-    # ideal system — exactly what REW's deconvolution achieves.
-    inv_mod = np.exp(-t * np.log(f2 / f1) / T)   # amplitude envelope
-    # Time-reverse the *un-windowed* sweep so the inverse filter is pure
-    sweep_raw = np.sin(2.0 * np.pi * f1 * L * (np.exp(t / L) - 1.0))
+    # The exponential envelope compensates the ESS's −3 dB/octave power
+    # spectrum, so that convolving a flat system's response gives a delta.
+    #
+    # Normalisation must use the PLAYED sweep (at target dBFS), not the
+    # unit-amplitude raw sweep — otherwise the deconvolved level is wrong
+    # by exactly 2 × |level_dbfs| dB, producing the constant offset seen
+    # when comparing against calibrated REW .mdat reference data.
+    inv_mod    = np.exp(-t * np.log(f2 / f1) / T)
+    sweep_raw  = np.sin(2.0 * np.pi * f1 * L * (np.exp(t / L) - 1.0))
     inv_filter = sweep_raw[::-1] * inv_mod
 
-    # Normalise so peak of deconvolved impulse ≈ 0 dB
-    # (REW normalises the IR peak, not the inverse filter directly)
-    inv_filter = inv_filter / (np.sum(sweep_raw ** 2) / N + 1e-30)
+    # Divide by the energy of the *played* sweep (amplitude-scaled to dBFS).
+    # This makes peak(IR) = 1.0 for a 0 dB gain system, so the deconvolved
+    # magnitude is in dBFS relative to the recorded signal level — ready for
+    # the SPL offset step that adds the microphone's sensitivity constant.
+    played_energy = np.sum(sweep.astype(np.float64) ** 2)
+    inv_filter    = inv_filter / (played_energy + 1e-30)
 
     # ── Playback signal with silence padding ─────────────────────────────
     pre  = np.zeros(int(pre_s  * fs), dtype=np.float32)
@@ -340,6 +358,39 @@ def load_calibration(cal_file):
 def apply_calibration(freqs, mag_db, cal_f, cal_db):
     correction = np.interp(freqs, cal_f, cal_db, left=cal_db[0], right=cal_db[-1])
     return mag_db - correction
+
+
+def compute_spl_offset(meas_f, meas_db, refs,
+                       align_lo=300.0, align_hi=3000.0):
+    """Compute the dB offset needed to align the measured curve to the mean
+    of all reference curves in the alignment band [align_lo, align_hi] Hz.
+
+    This is the practical substitute for a full SPL calibration when the
+    microphone sensitivity constant is not available.  REW itself offers the
+    same option via "Align SPL" in the overlay controls.
+
+    Returns the offset in dB (add to meas_db to align), or 0.0 if no refs.
+    """
+    if not refs:
+        return 0.0
+
+    mask_m = (meas_f >= align_lo) & (meas_f <= align_hi)
+    if not mask_m.any():
+        return 0.0
+
+    meas_mean = np.mean(meas_db[mask_m])
+
+    ref_means = []
+    for ref in refs:
+        mask_r = (ref["freqs"] >= align_lo) & (ref["freqs"] <= align_hi)
+        if mask_r.any():
+            ref_means.append(np.mean(ref["spl_raw"][mask_r]))
+
+    if not ref_means:
+        return 0.0
+
+    offset = np.mean(ref_means) - meas_mean
+    return float(offset)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -637,6 +688,12 @@ def main():
     ap.add_argument("--smoothing",  default=None, choices=list(SMOOTHING_MAP.keys()))
     ap.add_argument("--output-dir", default=DEFAULT_DATA_DIR,
                     help="Output directory for PNG, CSV, WAV")
+    ap.add_argument("--spl-offset", default=SPL_OFFSET_DEFAULT,
+                    help=("dB to add to measured curve to reach absolute dBSPL.  "
+                          "'auto' (default) aligns to the mean of reference files "
+                          "in the 300–3000 Hz band.  Set to 0 to disable.  "
+                          "To find your value: play a 94 dBSPL 1 kHz tone, note "
+                          "the recorded dBFS level, then offset = 94 − recorded_dBFS."))
     args = ap.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -679,6 +736,7 @@ def main():
 
     # ESS deconvolution analysis
     meas_f = meas_db = None
+    ref_raw = []   # populated inside measurement block (for auto SPL align) or below
     if recording is not None:
         print("\n🔬 ESS deconvolution → impulse response → FFT …")
         # Strip pre-silence so the recording starts at sweep time 0
@@ -700,7 +758,7 @@ def main():
                                        left=cal_db[0], right=cal_db[-1])
                 mag_lin = mag_lin - cal_on_lin
         else:
-            print("ℹ  No calibration file — magnitudes are relative (dB re: system peak)")
+            print("ℹ  No calibration file — frequency-response corrections skipped")
 
         # Re-sample onto log frequency grid (matches REW display)
         meas_f, meas_db = resample_to_log_grid(freqs_lin, mag_lin)
@@ -710,11 +768,38 @@ def main():
             print(f"   Applying 1/{octave_frac}-octave smoothing …")
             meas_db = octave_smooth(meas_f, meas_db, octave_frac)
 
-        print(f"   Result range: {meas_db.min():.1f} – {meas_db.max():.1f} dB")
+        # ── SPL offset (absolute level alignment) ────────────────────────
+        # Load refs early so we can use them for auto-alignment
+        print(f"\n📁 Loading .mdat references from: {args.ref_dir}")
+        ref_raw = load_mdat_dir(args.ref_dir)
 
-    # Load .mdat reference files
-    print(f"\n📁 Loading .mdat references from: {args.ref_dir}")
-    ref_raw = load_mdat_dir(args.ref_dir)
+        spl_arg = args.spl_offset
+        if spl_arg == "auto":
+            if ref_raw:
+                spl_off = compute_spl_offset(meas_f, meas_db, ref_raw)
+                print(f"🎚  SPL offset (auto-aligned to refs, 300–3 kHz): "
+                      f"{spl_off:+.1f} dB")
+                print(f"   ℹ  To skip auto-align next time: --spl-offset {spl_off:.1f}")
+            else:
+                spl_off = 0.0
+                print("ℹ  No references available for auto SPL alignment — "
+                      "use --spl-offset <dB> for absolute SPL")
+        else:
+            try:
+                spl_off = float(spl_arg)
+                print(f"🎚  SPL offset (manual): {spl_off:+.1f} dB")
+            except ValueError:
+                print(f"⚠  Invalid --spl-offset '{spl_arg}', defaulting to 0")
+                spl_off = 0.0
+
+        meas_db = meas_db + spl_off
+        print(f"   Measurement range after offset: "
+              f"{meas_db.min():.1f} – {meas_db.max():.1f} dB")
+
+    # Load .mdat reference files (if no measurement was made, load them now)
+    if meas_f is None:
+        print(f"\n📁 Loading .mdat references from: {args.ref_dir}")
+        ref_raw = load_mdat_dir(args.ref_dir)
     if not ref_raw:
         print("  (none found)")
 
