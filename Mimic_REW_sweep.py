@@ -57,7 +57,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 #  CONFIGURATION DEFAULTS
 # ═══════════════════════════════════════════════════════════════════════════
 SWEEP_START_HZ   = 1           # Match REW "Start Freq: 0 Hz" (1 Hz avoids log(0))
-SWEEP_END_HZ     = 20_000
+SWEEP_END_HZ     = 40_000
 # REW default sweep length is 256k samples @ 48 kHz = 5.333... s
 # Using the exact same sample count (not a rounded duration) ensures the
 # inverse filter energy normalisation is identical to REW's.
