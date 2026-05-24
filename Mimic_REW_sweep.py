@@ -76,16 +76,18 @@ DEFAULT_DATA_DIR = "data"
 IR_FADE_IN_S   = 0.002
 IR_GATE_S      = 0.500
 
-PLOT_FMIN = 1
+PLOT_FMIN = 10     # REW plots from 10 Hz even when sweep starts at 1 Hz
 PLOT_FMAX = 24_000
 
-# ── Absolute SPL offset ──────────────────────────────────────────────────
-# REW stores absolute dBSPL in .mdat files.  Our deconvolution outputs dBFS
-# (relative to playback level).  The gap is:
-#   offset_dB = mic_sensitivity_dBFS_at_94dBSPL + 94 + soundcard_output_gain
-# Set --spl-offset to a numeric value to shift the measured curve, or leave
-# as "auto" to have the script compute it from the loaded reference files.
-SPL_OFFSET_DEFAULT = "auto"
+# ── Absolute SPL calibration ─────────────────────────────────────────────
+# For UMIK-1 calibration files the header encodes:
+#   "Sens Factor = X dB, AGain = Y dB"
+# The sensitivity offset (dBFS → dBSPL) is:
+#   sensitivity_offset = UMIK1_BASE_SENSITIVITY + AGain − Sens_Factor
+# where UMIK1_BASE_SENSITIVITY = 102 dB is the capsule+ADC offset at 0 dB gain.
+# This gives: dBSPL = recorded_dBFS + sensitivity_offset
+# For our file (Sens=0.532, AGain=18): offset = 102 + 18 − 0.532 = 119.468 dB
+UMIK1_BASE_SENSITIVITY = 102.0   # dB — capsule sensitivity constant at 0 dB gain
 
 SMOOTHING_MAP = {
     "none": None,
@@ -325,72 +327,85 @@ def find_cal_file(data_dir):
 
 
 def load_calibration(cal_file):
-    """Load freq-correction calibration file (two columns: Hz  dB).
-    Comment lines starting with * or # are ignored.
-    Returns (cal_freqs, cal_db) sorted arrays, or (None, None) on failure."""
-    rows = []
+    """Load a UMIK-1 / miniDSP style calibration file.
+
+    Header line format (first line, possibly quoted):
+        "Sens Factor =X.XXXdB, AGain =YYdB, SERNO: XXXXXXX"
+
+    Data lines: two columns — Frequency_Hz  dB_correction
+    (positive = mic over-reads at that frequency → subtract to correct)
+
+    Returns
+    -------
+    cal_freqs         : ndarray — frequency points (Hz), sorted
+    cal_db            : ndarray — frequency-response corrections (dB)
+    sensitivity_offset: float  — dB to add to recorded_dBFS to reach dBSPL
+                                  = UMIK1_BASE_SENSITIVITY + AGain − Sens_Factor
+                                  Returns None if header not found (no abs SPL).
+    """
+    import re
+    sens_factor = None
+    again       = None
+    rows        = []
+
     try:
         with open(cal_file, encoding="utf-8", errors="replace") as f:
             for line in f:
-                line = line.strip()
-                if not line or line[0] in ("*", "#"):
+                line = line.strip().strip('"')   # remove surrounding quotes
+                if not line:
                     continue
+
+                # ── Try to parse the header line ─────────────────────────
+                if sens_factor is None:
+                    m_s = re.search(r'Sens\s+Factor\s*=\s*([\d.]+)\s*dB', line, re.IGNORECASE)
+                    m_g = re.search(r'AGain\s*=\s*([\d.]+)\s*dB',         line, re.IGNORECASE)
+                    if m_s and m_g:
+                        sens_factor = float(m_s.group(1))
+                        again       = float(m_g.group(1))
+                        print(f"📐 Cal header: Sens Factor={sens_factor} dB, "
+                              f"AGain={again} dB")
+                        continue          # header line — no data on it
+
+                # ── Data lines ───────────────────────────────────────────
                 parts = line.split()
                 if len(parts) >= 2:
                     try:
                         rows.append((float(parts[0]), float(parts[1])))
                     except ValueError:
                         continue
+
     except FileNotFoundError:
         print(f"⚠  Cal file not found: {cal_file}")
-        return None, None
+        return None, None, None
+
     if not rows:
-        print(f"⚠  Cal file empty: {cal_file}")
-        return None, None
+        print(f"⚠  Cal file has no data rows: {cal_file}")
+        return None, None, None
+
     arr = np.array(rows)
     idx = np.argsort(arr[:, 0])
-    print(f"📐 Calibration: {len(rows)} points  "
-          f"{arr[idx[0],0]:.0f}–{arr[idx[-1],0]:.0f} Hz  "
-          f"(range {arr[:,1].min():.1f}–{arr[:,1].max():.1f} dB)")
-    return arr[idx, 0], arr[idx, 1]
+    cal_freqs = arr[idx, 0]
+    cal_db    = arr[idx, 1]
 
+    # ── Absolute sensitivity offset ──────────────────────────────────────
+    # dBSPL = recorded_dBFS + sensitivity_offset
+    # For UMIK-1: sensitivity_offset = 102 + AGain − Sens_Factor
+    #   (102 dB = base capsule offset at 0 dB analog gain)
+    if sens_factor is not None and again is not None:
+        sensitivity_offset = UMIK1_BASE_SENSITIVITY + again - sens_factor
+        print(f"📐 Sensitivity offset: {UMIK1_BASE_SENSITIVITY:.0f} + {again:.0f} "
+              f"− {sens_factor:.3f} = {sensitivity_offset:.3f} dB  "
+              f"(0 dBFS → {sensitivity_offset:.1f} dBSPL)")
+    else:
+        sensitivity_offset = None
+        print("⚠  Cal header not parsed — frequency corrections applied, "
+              "but no absolute SPL conversion (output is relative dB)")
 
-def apply_calibration(freqs, mag_db, cal_f, cal_db):
-    correction = np.interp(freqs, cal_f, cal_db, left=cal_db[0], right=cal_db[-1])
-    return mag_db - correction
+    print(f"📐 Freq corrections: {len(rows)} pts  "
+          f"{cal_freqs[0]:.0f}–{cal_freqs[-1]:.0f} Hz  "
+          f"(range {cal_db.min():.2f} to {cal_db.max():.2f} dB)")
 
-
-def compute_spl_offset(meas_f, meas_db, refs,
-                       align_lo=300.0, align_hi=3000.0):
-    """Compute the dB offset needed to align the measured curve to the mean
-    of all reference curves in the alignment band [align_lo, align_hi] Hz.
-
-    This is the practical substitute for a full SPL calibration when the
-    microphone sensitivity constant is not available.  REW itself offers the
-    same option via "Align SPL" in the overlay controls.
-
-    Returns the offset in dB (add to meas_db to align), or 0.0 if no refs.
-    """
-    if not refs:
-        return 0.0
-
-    mask_m = (meas_f >= align_lo) & (meas_f <= align_hi)
-    if not mask_m.any():
-        return 0.0
-
-    meas_mean = np.mean(meas_db[mask_m])
-
-    ref_means = []
-    for ref in refs:
-        mask_r = (ref["freqs"] >= align_lo) & (ref["freqs"] <= align_hi)
-        if mask_r.any():
-            ref_means.append(np.mean(ref["spl_raw"][mask_r]))
-
-    if not ref_means:
-        return 0.0
-
-    offset = np.mean(ref_means) - meas_mean
-    return float(offset)
+    return cal_freqs, cal_db, sensitivity_offset
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -567,10 +582,10 @@ def load_mdat_dir(ref_dir):
 def _freq_axis(ax):
     ax.set_xscale("log")
     ax.set_xlim(PLOT_FMIN, PLOT_FMAX)
-    major = [2,3,4,5,6,7,8,10,
-             20,30,40,50,60,70,80,100,
-             200,300,400,500,600,700,800,1000,
-             2000,3000,4000,5000,6000,7000,8000,10000,20000]
+    # Ticks from 10 Hz upward — matches REW's display range
+    major = [10, 20, 30, 40, 50, 60, 70, 80, 100,
+             200, 300, 400, 500, 600, 700, 800, 1000,
+             2000, 3000, 4000, 5000, 6000, 7000, 8000, 10000, 20000]
     ax.set_xticks(major)
     ax.xaxis.set_major_formatter(
         ticker.FuncFormatter(lambda x, _: f"{int(x//1000)}k" if x >= 1000 else str(int(x)))
@@ -579,43 +594,55 @@ def _freq_axis(ax):
 
 
 def plot_responses(meas_f, meas_db, refs, smooth_label, out_path):
-    fig, ax = plt.subplots(figsize=(18, 7))
+    fig, ax = plt.subplots(figsize=(20, 8))
     fig.patch.set_facecolor("#1a1a1a")
     ax.set_facecolor("#1e1e1e")
-    ax.grid(True, which="major", color="#333333", lw=0.7)
+    ax.grid(True, which="major", color="#333333", lw=0.8)
     ax.grid(True, which="minor", color="#2a2a2a", lw=0.4, ls=":")
 
     all_vals = []
 
-    if meas_f is not None:
-        ax.plot(meas_f, meas_db, color=COLOUR_MEASURED, lw=0.9, alpha=0.95,
-                label=f"Measured  (smoothing: {smooth_label})")
-        all_vals.extend(meas_db[np.isfinite(meas_db)])
-
+    # ── Reference lines — thick but transparent so measured stands out ───
     for i, ref in enumerate(refs):
         c = COLOUR_REF_CYCLE[i % len(COLOUR_REF_CYCLE)]
-        ax.plot(ref["freqs"], ref["spl_plot"], color=c, lw=1.2, alpha=0.85,
+        # Only plot reference points within the display range
+        mask = (ref["freqs"] >= PLOT_FMIN) & (ref["freqs"] <= PLOT_FMAX)
+        ax.plot(ref["freqs"][mask], ref["spl_plot"][mask],
+                color=c, lw=2.5, alpha=0.40,
                 label=f"{ref['name']}  [REF]")
-        all_vals.extend(ref["spl_plot"][np.isfinite(ref["spl_plot"])])
+        all_vals.extend(ref["spl_plot"][mask][np.isfinite(ref["spl_plot"][mask])])
+
+    # ── Measured line — full opacity, prominent ───────────────────────────
+    if meas_f is not None:
+        mask_m = (meas_f >= PLOT_FMIN) & (meas_f <= PLOT_FMAX)
+        ax.plot(meas_f[mask_m], meas_db[mask_m],
+                color=COLOUR_MEASURED, lw=1.8, alpha=1.0, zorder=5,
+                label=f"Measured  (smoothing: {smooth_label})")
+        all_vals.extend(meas_db[mask_m][np.isfinite(meas_db[mask_m])])
 
     _freq_axis(ax)
-    ax.set_xlabel("Frequency (Hz)", color="#cccccc", fontsize=11)
-    ax.set_ylabel("SPL (dB)", color="#cccccc", fontsize=11)
+
+    # ── Labels & title (larger, readable) ────────────────────────────────
+    ax.set_xlabel("Frequency (Hz)", color="#dddddd", fontsize=14, labelpad=8)
+    ax.set_ylabel("SPL (dB)",       color="#dddddd", fontsize=14, labelpad=8)
+    ax.set_title("Frequency Response Comparison",
+                 color="#ffffff", fontsize=16, pad=14, fontweight="bold")
 
     if all_vals:
         lo = max(0,   np.percentile(all_vals,  1) - 10)
         hi = min(160, np.percentile(all_vals, 99) + 10)
         step = 10
         ax.set_ylim(lo, hi)
-        ax.set_yticks(np.arange(round(lo / step) * step, round(hi / step) * step + step, step))
+        ax.set_yticks(np.arange(round(lo / step) * step,
+                                round(hi / step) * step + step, step))
 
-    ax.tick_params(colors="#aaaaaa", labelsize=9)
+    ax.tick_params(colors="#bbbbbb", labelsize=11)
     for sp in ax.spines.values():
-        sp.set_color("#444444")
+        sp.set_color("#555555")
 
-    ax.legend(loc="upper left", fontsize=9,
-              facecolor="#2a2a2a", edgecolor="#555555", labelcolor="#eeeeee")
-    ax.set_title("Frequency Response Comparison", color="#eeeeee", fontsize=13, pad=10)
+    ax.legend(loc="upper left", fontsize=12,
+              facecolor="#2a2a2a", edgecolor="#666666", labelcolor="#eeeeee",
+              framealpha=0.85, borderpad=0.8, labelspacing=0.5)
 
     plt.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
@@ -682,18 +709,14 @@ def main():
     ap.add_argument("--sweep-file", default=None,
                     help="Existing recorded sweep WAV (used with --no-record)")
     ap.add_argument("--cal-file",   default=None,
-                    help="Mic calibration .txt (auto-detected in data/ if omitted)")
+                    help="Mic calibration .txt — auto-detected in data/ if omitted. "
+                         "For UMIK-1 files the header Sens Factor + AGain are used "
+                         "to convert deconvolved dBFS → absolute dBSPL.")
     ap.add_argument("--ref-dir",    default=f"{DEFAULT_DATA_DIR}/REW Standard Data",
                     help="Directory of .mdat reference files")
     ap.add_argument("--smoothing",  default=None, choices=list(SMOOTHING_MAP.keys()))
     ap.add_argument("--output-dir", default=DEFAULT_DATA_DIR,
                     help="Output directory for PNG, CSV, WAV")
-    ap.add_argument("--spl-offset", default=SPL_OFFSET_DEFAULT,
-                    help=("dB to add to measured curve to reach absolute dBSPL.  "
-                          "'auto' (default) aligns to the mean of reference files "
-                          "in the 300–3000 Hz band.  Set to 0 to disable.  "
-                          "To find your value: play a 94 dBSPL 1 kHz tone, note "
-                          "the recorded dBFS level, then offset = 94 − recorded_dBFS."))
     args = ap.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -748,19 +771,21 @@ def main():
         )
         print(f"   IR peak at sample {peak} ({peak/SAMPLE_RATE*1000:.1f} ms)")
 
-        # Auto-detect calibration if needed
+        # ── Load calibration file ────────────────────────────────────────
         cal_file = args.cal_file or find_cal_file(DEFAULT_DATA_DIR)
+        sensitivity_offset = None
         if cal_file:
-            cal_f, cal_db = load_calibration(cal_file)
+            cal_f, cal_db, sensitivity_offset = load_calibration(cal_file)
             if cal_f is not None:
-                # Interpolate cal onto linear freq grid before log resampling
+                # 1. Apply frequency-response correction on the linear grid
+                #    (positive cal value → mic reads high → subtract)
                 cal_on_lin = np.interp(freqs_lin, cal_f, cal_db,
                                        left=cal_db[0], right=cal_db[-1])
                 mag_lin = mag_lin - cal_on_lin
         else:
-            print("ℹ  No calibration file — frequency-response corrections skipped")
+            print("ℹ  No calibration file found in data/ — output is relative dB")
 
-        # Re-sample onto log frequency grid (matches REW display)
+        # Re-sample onto log frequency grid (matches REW display, 10–20k Hz)
         meas_f, meas_db = resample_to_log_grid(freqs_lin, mag_lin)
 
         # Apply smoothing
@@ -768,36 +793,32 @@ def main():
             print(f"   Applying 1/{octave_frac}-octave smoothing …")
             meas_db = octave_smooth(meas_f, meas_db, octave_frac)
 
-        # ── SPL offset (absolute level alignment) ────────────────────────
-        # Load refs early so we can use them for auto-alignment
-        print(f"\n📁 Loading .mdat references from: {args.ref_dir}")
-        ref_raw = load_mdat_dir(args.ref_dir)
-
-        spl_arg = args.spl_offset
-        if spl_arg == "auto":
-            if ref_raw:
-                spl_off = compute_spl_offset(meas_f, meas_db, ref_raw)
-                print(f"🎚  SPL offset (auto-aligned to refs, 300–3 kHz): "
-                      f"{spl_off:+.1f} dB")
-                print(f"   ℹ  To skip auto-align next time: --spl-offset {spl_off:.1f}")
-            else:
-                spl_off = 0.0
-                print("ℹ  No references available for auto SPL alignment — "
-                      "use --spl-offset <dB> for absolute SPL")
+        # ── Convert dBFS → absolute dBSPL using mic sensitivity ──────────
+        # dBSPL(f) = mag_db(f)  +  SWEEP_LEVEL_DBFS  +  sensitivity_offset
+        #
+        # Explanation:
+        #   mag_db is the system transfer function H(f) in dB:
+        #     H(f) = 0 dB means the recorded level equals the played level
+        #   recorded_dBFS = SWEEP_LEVEL_DBFS + mag_db
+        #   dBSPL = recorded_dBFS + sensitivity_offset
+        #         = mag_db + SWEEP_LEVEL_DBFS + sensitivity_offset
+        if sensitivity_offset is not None:
+            spl_const = SWEEP_LEVEL_DBFS + sensitivity_offset
+            meas_db   = meas_db + spl_const
+            print(f"🎚  SPL conversion: mag_db + {SWEEP_LEVEL_DBFS} dBFS "
+                  f"+ {sensitivity_offset:.3f} dB (mic sens) "
+                  f"= mag_db + {spl_const:.3f} dB")
         else:
-            try:
-                spl_off = float(spl_arg)
-                print(f"🎚  SPL offset (manual): {spl_off:+.1f} dB")
-            except ValueError:
-                print(f"⚠  Invalid --spl-offset '{spl_arg}', defaulting to 0")
-                spl_off = 0.0
+            print("ℹ  No sensitivity offset — output is relative dB "
+                  "(not absolute dBSPL)")
 
-        meas_db = meas_db + spl_off
-        print(f"   Measurement range after offset: "
-              f"{meas_db.min():.1f} – {meas_db.max():.1f} dB")
+        print(f"   Measurement range: {meas_db.min():.1f} – {meas_db.max():.1f} dB")
 
     # Load .mdat reference files (if no measurement was made, load them now)
     if meas_f is None:
+        print(f"\n📁 Loading .mdat references from: {args.ref_dir}")
+        ref_raw = load_mdat_dir(args.ref_dir)
+    else:
         print(f"\n📁 Loading .mdat references from: {args.ref_dir}")
         ref_raw = load_mdat_dir(args.ref_dir)
     if not ref_raw:
