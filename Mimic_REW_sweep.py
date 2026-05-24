@@ -392,7 +392,7 @@ def load_calibration(cal_file):
     # For UMIK-1: sensitivity_offset = 102 + AGain − Sens_Factor
     #   (102 dB = base capsule offset at 0 dB analog gain)
     if sens_factor is not None and again is not None:
-        sensitivity_offset = UMIK1_BASE_SENSITIVITY + again - sens_factor
+        sensitivity_offset = 94 - sens_factor
         print(f"📐 Sensitivity offset: {UMIK1_BASE_SENSITIVITY:.0f} + {again:.0f} "
               f"− {sens_factor:.3f} = {sensitivity_offset:.3f} dB  "
               f"(0 dBFS → {sensitivity_offset:.1f} dBSPL)")
