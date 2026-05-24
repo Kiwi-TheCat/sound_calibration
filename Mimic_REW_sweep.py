@@ -77,7 +77,7 @@ IR_FADE_IN_S   = 0.002
 IR_GATE_S      = 0.500
 
 PLOT_FMIN = 10     # REW plots from 10 Hz even when sweep starts at 1 Hz
-PLOT_FMAX = 24_000
+PLOT_FMAX = 40_000
 
 # ── Absolute SPL calibration ─────────────────────────────────────────────
 # For UMIK-1 calibration files the header encodes:
