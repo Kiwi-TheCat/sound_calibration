@@ -57,7 +57,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 #  CONFIGURATION DEFAULTS
 # ═══════════════════════════════════════════════════════════════════════════
 SWEEP_START_HZ   = 1           # Match REW "Start Freq: 0 Hz" (1 Hz avoids log(0))
-SWEEP_END_HZ     = 40_000
+SWEEP_END_HZ     = 24_000
 # REW default sweep length is 256k samples @ 48 kHz = 5.333... s
 # Using the exact same sample count (not a rounded duration) ensures the
 # inverse filter energy normalisation is identical to REW's.
@@ -77,7 +77,7 @@ IR_FADE_IN_S   = 0.002
 IR_GATE_S      = 0.500
 
 PLOT_FMIN = 10     # REW plots from 10 Hz even when sweep starts at 1 Hz
-PLOT_FMAX = 40_000
+PLOT_FMAX = 24_000
 
 # ── Absolute SPL calibration ─────────────────────────────────────────────
 # For UMIK-1 calibration files the header encodes:
