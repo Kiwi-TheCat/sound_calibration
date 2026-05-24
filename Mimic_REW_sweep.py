@@ -87,7 +87,7 @@ PLOT_FMAX = 24_000
 # where UMIK1_BASE_SENSITIVITY = 102 dB is the capsule+ADC offset at 0 dB gain.
 # This gives: dBSPL = recorded_dBFS + sensitivity_offset
 # For our file (Sens=0.532, AGain=18): offset = 102 + 18 − 0.532 = 119.468 dB
-UMIK1_BASE_SENSITIVITY = 102.0   # dB — capsule sensitivity constant at 0 dB gain
+UMIK1_BASE_SENSITIVITY = 94.0   # dB — capsule sensitivity constant at 0 dB gain
 
 SMOOTHING_MAP = {
     "none": None,
