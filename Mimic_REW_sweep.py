@@ -406,7 +406,7 @@ def load_calibration(cal_file):
     # For UMIK-1: sensitivity_offset = 102 + AGain − Sens_Factor
     #   (102 dB = base capsule offset at 0 dB analog gain)
     if sens_factor is not None and again is not None:
-        sensitivity_offset = 100 - sens_factor + 24
+        sensitivity_offset = UMIK1_BASE_SENSITIVITY + again - sens_factor
         print(f"📐 Sensitivity offset: {UMIK1_BASE_SENSITIVITY:.0f} + {again:.0f} "
               f"− {sens_factor:.3f} = {sensitivity_offset:.3f} dB  "
               f"(0 dBFS → {sensitivity_offset:.1f} dBSPL)")
@@ -825,6 +825,13 @@ def main():
             print("❌ sounddevice unavailable "
                   "(install: pip install sounddevice + libportaudio2)")
         else:
+            # Force high real-time priority on Linux architectures to prevent buffer underruns
+            if sys.platform.startswith('linux'):
+                try:
+                    os.nice(-10) # Lower nice value = higher execution priority
+                except PermissionError:
+                    print("ℹ  Run with 'sudo' for real-time thread priority scheduling")
+            
             recording = record_sweep(playback, out_file=str(wav_path))
 
     # ── ESS deconvolution analysis ───────────────────────────────────────
@@ -872,7 +879,9 @@ def main():
         #   dBSPL = recorded_dBFS + sensitivity_offset
         #         = mag_db + SWEEP_LEVEL_DBFS + sensitivity_offset
         if sensitivity_offset is not None:
-            spl_const = SWEEP_LEVEL_DBFS + sensitivity_offset
+            # Add +3.0103 dB to scale Farina peak deconvolution matrices 
+            # to REW's internal RMS reference scaling grid (which is what the .mdat refs are based on).
+            spl_const = SWEEP_LEVEL_DBFS + sensitivity_offset + 3.0103
             meas_db   = meas_db + spl_const
             print(f"🎚  SPL conversion: mag_db + {SWEEP_LEVEL_DBFS} dBFS "
                   f"+ {sensitivity_offset:.3f} dB (mic sens) "
