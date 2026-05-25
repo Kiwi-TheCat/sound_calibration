@@ -166,23 +166,16 @@ def generate_ess(
     # unit-amplitude raw sweep — otherwise the deconvolved level is wrong
     # by exactly 2 × |level_dbfs| dB, producing the constant offset seen
     # when comparing against calibrated REW .mdat reference data.
-    inv_mod    = np.exp(-t * np.log(f2 / f1) / T)
-    sweep_raw  = np.sin(2.0 * np.pi * f1 * L * (np.exp(t / L) - 1.0))
-    inv_filter = sweep_raw[::-1] * inv_mod
+    inv_mod = np.exp(-t * np.log(f2 / f1) / T)
+    
+    # FIX: Use the attenuated 'sweep' (scaled to -12 dBFS), NOT the 1.0 amplitude sweep_raw
+    # This ensures the convolution peak for a perfect loopback is exactly 1.0 (0 dB).
+    inv_filter = sweep[::-1] * inv_mod
 
-    # Divide by the energy of the *played* sweep (amplitude-scaled to dBFS).
-    # This makes peak(IR) = 1.0 for a 0 dB gain system, so the deconvolved
-    # magnitude is in dBFS relative to the recorded signal level — ready for
-    # the SPL offset step that adds the microphone's sensitivity constant.
+    # Divide by the energy of the *played* sweep
+    # (Since inv_filter and played_energy now use the same scaled sweep, the math balances perfectly)
     played_energy = np.sum(sweep.astype(np.float64) ** 2)
-    inv_filter    = inv_filter / (played_energy + 1e-30)
-
-    # ── Playback signal with silence padding ─────────────────────────────
-    pre  = np.zeros(int(pre_s  * fs), dtype=np.float32)
-    post = np.zeros(int(post_s * fs), dtype=np.float32)
-    playback = np.concatenate([pre, sweep.astype(np.float32), post])
-
-    return sweep.astype(np.float32), inv_filter.astype(np.float64), playback
+    inv_filter    = inv_filter / (played_energy + 1e-30) 
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -881,17 +874,15 @@ def main():
         base_offset = SWEEP_LEVEL_DBFS + 3.0103
 
         if sensitivity_offset is not None:
-            # 2a. We have mic sensitivity, calculate TRUE absolute SPL
             spl_const = base_offset + sensitivity_offset
             meas_db   = meas_db + spl_const
-            print(f"🎚  SPL conversion: mag_db + {SWEEP_LEVEL_DBFS} dBFS "
-                  f"+ {sensitivity_offset:.3f} dB (mic sens) + 3.01 dB (RMS) "
+            print(f"🎚  SPL conversion: mag_db {SWEEP_LEVEL_DBFS} dBFS (sweep) "
+                  f"- 3.01 dB (RMS) + {sensitivity_offset:.3f} dB (mic sens) "
                   f"= mag_db + {spl_const:.3f} dB")
         else:
-            # 2b. No mic calibration header found, but we STILL need the sweep offset
             meas_db   = meas_db + base_offset
             print(f"🎚  Relative SPL conversion: applied {base_offset:.3f} dB "
-                  f"({SWEEP_LEVEL_DBFS} dB sweep + 3.01 dB RMS). "
+                  f"({SWEEP_LEVEL_DBFS} dB sweep - 3.01 dB RMS). "
                   f"Note: No absolute mic sensitivity applied.")
 
         print(f"   Measurement range: {meas_db.min():.1f} – {meas_db.max():.1f} dB")
