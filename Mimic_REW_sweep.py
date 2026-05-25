@@ -74,7 +74,7 @@ DEFAULT_DATA_DIR = "data"
 
 # IR time window — gate long enough for 2 Hz frequency resolution (1/0.5 s)
 IR_FADE_IN_S   = 0.002
-IR_GATE_S      = 0.500
+IR_GATE_S      = 0.200
 
 PLOT_FMIN = 10     # REW plots from 10 Hz even when sweep starts at 1 Hz
 PLOT_FMAX = 24_000
