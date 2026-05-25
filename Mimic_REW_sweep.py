@@ -160,8 +160,12 @@ def generate_ess(
     # This makes peak(IR) = 1.0 for a 0 dB gain system, so the deconvolved
     # magnitude is in dBFS relative to the recorded signal level — ready for
     # the SPL offset step that adds the microphone's sensitivity constant.
-    played_energy = np.sum(sweep.astype(np.float64) ** 2)
-    inv_filter    = inv_filter / (played_energy + 1e-30)
+    # played_energy = np.sum(sweep.astype(np.float64) ** 2)
+    # inv_filter    = inv_filter / (played_energy + 1e-30)
+
+    # Test using raw energy instead of windowed enegery
+    raw_energy = np.sum(sweep_raw.astype(np.float64) ** 2)
+    inv_filter = inv_filter / (raw_energy + 1e-30)
 
     # ── Playback signal with silence padding ─────────────────────────────
     pre  = np.zeros(int(pre_s  * fs), dtype=np.float32)
