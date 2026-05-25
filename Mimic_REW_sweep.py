@@ -136,7 +136,7 @@ def generate_ess(
     sweep = np.sin(2.0 * np.pi * f1 * L * (np.exp(t / L) - 1.0))
 
     # Tukey window (2 % taper) to suppress end clicks without affecting spectrum
-    sweep *= sig.windows.tukey(N, alpha=0.02)
+    # sweep *= sig.windows.tukey(N, alpha=0.02)
 
     # Scale to target dBFS
     amplitude = 10.0 ** (level_dbfs / 20.0)
@@ -779,14 +779,8 @@ def main():
             if cal_f is not None:
                 # 1. Apply frequency-response correction on the linear grid
                 #    (positive cal value → mic reads high → subtract)
-                # cal_on_lin = np.interp(freqs_lin, cal_f, cal_db,
-                #                        left=cal_db[0], right=cal_db[-1])
-                
-                # Try: skip calibration above highest measured point
-                mask_above = freqs_lin > cal_f[-1]
                 cal_on_lin = np.interp(freqs_lin, cal_f, cal_db,
-                                    left=cal_db[0], right=0)  # no correction above
-                cal_on_lin[mask_above] = 0  # ensure 0 dB (no correction) above 20 kHz
+                                       left=cal_db[0], right=cal_db[-1])
                 mag_lin = mag_lin - cal_on_lin
         else:
             print("ℹ  No calibration file found in data/ — output is relative dB")
