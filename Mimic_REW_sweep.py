@@ -197,7 +197,8 @@ def record_sweep(playback_signal, fs=SAMPLE_RATE, out_file=OUTPUT_WAV):
     print(f"▶  Output : {sd.query_devices(out_id)['name']}")
     print(f"🎙  Input  : {sd.query_devices(in_id)['name']}")
     print(f"⏳ Recording {len(playback_signal)/fs:.1f} s …")
-    rec = sd.playrec(playback_signal[:, None], samplerate=fs, channels=1, dtype="float32")
+    stereo_signal = np.column_stack([playback_signal, playback_signal])
+    rec = sd.playrec(stereo_signal, samplerate=fs, channels=2, dtype="float32")
     sd.wait()
     rec = rec[:, 0]
     print(f"✅ Done. Peak: {20*np.log10(np.max(np.abs(rec))+1e-12):.1f} dBFS")
