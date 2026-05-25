@@ -160,12 +160,8 @@ def generate_ess(
     # This makes peak(IR) = 1.0 for a 0 dB gain system, so the deconvolved
     # magnitude is in dBFS relative to the recorded signal level — ready for
     # the SPL offset step that adds the microphone's sensitivity constant.
-    # played_energy = np.sum(sweep.astype(np.float64) ** 2)
-    # inv_filter    = inv_filter / (played_energy + 1e-30)
-
-    # Test using raw energy instead of windowed enegery
-    raw_energy = np.sum(sweep_raw.astype(np.float64) ** 2)
-    inv_filter = inv_filter / (raw_energy + 1e-30)
+    played_energy = np.sum(sweep.astype(np.float64) ** 2)
+    inv_filter    = inv_filter / (played_energy + 1e-30)
 
     # ── Playback signal with silence padding ─────────────────────────────
     pre  = np.zeros(int(pre_s  * fs), dtype=np.float32)
@@ -783,8 +779,14 @@ def main():
             if cal_f is not None:
                 # 1. Apply frequency-response correction on the linear grid
                 #    (positive cal value → mic reads high → subtract)
+                # cal_on_lin = np.interp(freqs_lin, cal_f, cal_db,
+                #                        left=cal_db[0], right=cal_db[-1])
+                
+                # Try: skip calibration above highest measured point
+                mask_above = freqs_lin > cal_f[-1]
                 cal_on_lin = np.interp(freqs_lin, cal_f, cal_db,
-                                       left=cal_db[0], right=cal_db[-1])
+                                    left=cal_db[0], right=0)  # no correction above
+                cal_on_lin[mask_above] = 0  # ensure 0 dB (no correction) above 20 kHz
                 mag_lin = mag_lin - cal_on_lin
         else:
             print("ℹ  No calibration file found in data/ — output is relative dB")
