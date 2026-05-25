@@ -99,6 +99,20 @@ SMOOTHING_MAP = {
 COLOUR_MEASURED  = "#2ecc71"
 COLOUR_REF_CYCLE = ["#e74c3c", "#3498db", "#e67e22", "#9b59b6", "#1abc9c", "#f1c40f"]
 
+# ── Sweep file registry ──────────────────────────────────────────────────
+# Choice 1 → load a pre-made WAV from disk (left channel used as reference).
+# Choice 2 → generate the ESS programmatically (original Farina path).
+SWEEP_FILES = {
+    "1": {
+        "label": "New sweep  (256kMeasSweep_0_to_20000_-12_dBFS_48k_Float_LR.wav)",
+        "path":  "256kMeasSweep_0_to_20000_-12_dBFS_48k_Float_LR.wav",
+    },
+    "2": {
+        "label": "Generated ESS sweep  (built-in Farina log-chirp)",
+        "path":  None,   # None = generate programmatically
+    },
+}
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  ESS SWEEP GENERATION  (Farina 2000 formulation)
@@ -209,7 +223,7 @@ def record_sweep(playback_signal, fs=SAMPLE_RATE, out_file=OUTPUT_WAV):
 def load_wav(path):
     data, sr = sf.read(path, dtype="float32", always_2d=False)
     if data.ndim > 1:
-        data = data[:, 0]
+        data = data[:, 0]   # use left channel only
     print(f"📂 Loaded: {path}  ({len(data)/sr:.1f} s @ {sr} Hz)")
     return data, sr
 
@@ -392,7 +406,7 @@ def load_calibration(cal_file):
     # For UMIK-1: sensitivity_offset = 102 + AGain − Sens_Factor
     #   (102 dB = base capsule offset at 0 dB analog gain)
     if sens_factor is not None and again is not None:
-        sensitivity_offset = 100 - sens_factor + 24
+        sensitivity_offset = UMIK1_BASE_SENSITIVITY + again - sens_factor
         print(f"📐 Sensitivity offset: {UMIK1_BASE_SENSITIVITY:.0f} + {again:.0f} "
               f"− {sens_factor:.3f} = {sensitivity_offset:.3f} dB  "
               f"(0 dBFS → {sensitivity_offset:.1f} dBSPL)")
@@ -678,7 +692,7 @@ def save_csv(meas_f, meas_db, refs, out_path):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  INTERACTIVE PROMPT
+#  INTERACTIVE PROMPTS
 # ═══════════════════════════════════════════════════════════════════════════
 
 def prompt_smoothing():
@@ -693,6 +707,19 @@ def prompt_smoothing():
             return "none"
         if c.isdigit() and 1 <= int(c) <= len(opts):
             return opts[int(c) - 1]
+
+
+def prompt_sweep_choice():
+    """Ask the user which sweep source to use before recording."""
+    print("\n── Sweep source ────────────────────────────────────────────")
+    for k, v in SWEEP_FILES.items():
+        print(f"  [{k}] {v['label']}")
+    print("────────────────────────────────────────────────────────────")
+    while True:
+        c = input("Select [1–2, default=2]: ").strip() or "2"
+        if c in SWEEP_FILES:
+            return c
+        print("  Please enter 1 or 2.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -729,17 +756,57 @@ def main():
     print("  REW-Mimic Acoustic Analysis Tool  (ESS / Farina method)")
     print("═" * 60)
 
-    # Smoothing
+    # ── Smoothing ────────────────────────────────────────────────────────
     smooth_key  = args.smoothing or prompt_smoothing()
     octave_frac = SMOOTHING_MAP[smooth_key]
     print(f"\n🎛  Smoothing: {smooth_key}")
 
-    # Generate ESS sweep + inverse filter
-    print(f"\n🔊 Generating {SWEEP_DURATION_S} s ESS  "
-          f"({SWEEP_START_HZ}–{SWEEP_END_HZ} Hz, {SWEEP_LEVEL_DBFS} dBFS) …")
-    sweep, inv_filter, playback = generate_ess()
+    # ── Sweep source selection ───────────────────────────────────────────
+    # Choice 1 → load pre-made WAV from disk (left channel used as sweep).
+    #            Inverse filter is rebuilt to match that WAV's exact length.
+    # Choice 2 → generate the ESS programmatically (original Farina path).
+    sweep_choice = prompt_sweep_choice()
+    choice_info  = SWEEP_FILES[sweep_choice]
+    print(f"\n🔊 Sweep: {choice_info['label']}")
 
-    # Record or load
+    if sweep_choice == "1":
+        # ── Load the external sweep WAV ──────────────────────────────────
+        ext_path = choice_info["path"]
+        if not Path(ext_path).exists():
+            print(f"❌ Sweep file not found: {ext_path}")
+            sys.exit(1)
+
+        sweep, ext_sr = load_wav(ext_path)
+
+        # Resample if the file's sample rate differs from our target
+        if ext_sr != SAMPLE_RATE:
+            from math import gcd
+            g = gcd(SAMPLE_RATE, ext_sr)
+            sweep = sig.resample_poly(
+                sweep, SAMPLE_RATE // g, ext_sr // g
+            ).astype(np.float32)
+            print(f"   Resampled {ext_sr} Hz → {SAMPLE_RATE} Hz")
+
+        # Build playback signal (silence padding mirrors the generated path)
+        silence_pre  = np.zeros(int(SILENCE_PRE_S  * SAMPLE_RATE), dtype=np.float32)
+        silence_post = np.zeros(int(SILENCE_POST_S * SAMPLE_RATE), dtype=np.float32)
+        playback = np.concatenate([silence_pre, sweep, silence_post])
+
+        # Rebuild the inverse filter matched to this sweep's exact duration.
+        # The energy normalisation inside generate_ess() must see the same T
+        # that was used to produce the loaded sweep, otherwise the deconvolved
+        # level will be offset.
+        T_ext = len(sweep) / SAMPLE_RATE
+        print(f"   Sweep duration: {T_ext:.4f} s  ({len(sweep)} samples @ {SAMPLE_RATE} Hz)")
+        _, inv_filter, _ = generate_ess(T=T_ext)
+
+    else:
+        # ── Generate ESS programmatically ────────────────────────────────
+        print(f"   Generating {SWEEP_DURATION_S} s ESS  "
+              f"({SWEEP_START_HZ}–{SWEEP_END_HZ} Hz, {SWEEP_LEVEL_DBFS} dBFS) …")
+        sweep, inv_filter, playback = generate_ess()
+
+    # ── Record or load ───────────────────────────────────────────────────
     recording = None
     if args.no_record:
         wav_src = args.sweep_file or str(wav_path)
@@ -748,18 +815,27 @@ def main():
             if rec_sr != SAMPLE_RATE:
                 from math import gcd
                 g = gcd(SAMPLE_RATE, rec_sr)
-                recording = sig.resample_poly(recording, SAMPLE_RATE // g, rec_sr // g).astype(np.float32)
+                recording = sig.resample_poly(
+                    recording, SAMPLE_RATE // g, rec_sr // g
+                ).astype(np.float32)
         else:
             print(f"⚠  WAV not found: {wav_src} — skipping measurement.")
     else:
         if not HAS_SD:
-            print("❌ sounddevice unavailable (install: pip install sounddevice + libportaudio2)")
+            print("❌ sounddevice unavailable "
+                  "(install: pip install sounddevice + libportaudio2)")
         else:
+            # Force high real-time priority on Linux architectures to prevent buffer underruns
+            if sys.platform.startswith('linux'):
+                try:
+                    os.nice(-10) # Lower nice value = higher execution priority
+                except PermissionError:
+                    print("ℹ  Run with 'sudo' for real-time thread priority scheduling")
+            
             recording = record_sweep(playback, out_file=str(wav_path))
 
-    # ESS deconvolution analysis
+    # ── ESS deconvolution analysis ───────────────────────────────────────
     meas_f = meas_db = None
-    ref_raw = []   # populated inside measurement block (for auto SPL align) or below
     if recording is not None:
         print("\n🔬 ESS deconvolution → impulse response → FFT …")
         # Strip pre-silence so the recording starts at sweep time 0
@@ -777,8 +853,8 @@ def main():
         if cal_file:
             cal_f, cal_db, sensitivity_offset = load_calibration(cal_file)
             if cal_f is not None:
-                # 1. Apply frequency-response correction on the linear grid
-                #    (positive cal value → mic reads high → subtract)
+                # Apply frequency-response correction on the linear grid
+                # (positive cal value → mic reads high → subtract)
                 cal_on_lin = np.interp(freqs_lin, cal_f, cal_db,
                                        left=cal_db[0], right=cal_db[-1])
                 mag_lin = mag_lin - cal_on_lin
@@ -802,25 +878,27 @@ def main():
         #   recorded_dBFS = SWEEP_LEVEL_DBFS + mag_db
         #   dBSPL = recorded_dBFS + sensitivity_offset
         #         = mag_db + SWEEP_LEVEL_DBFS + sensitivity_offset
+        base_offset = SWEEP_LEVEL_DBFS + 3.0103
+
         if sensitivity_offset is not None:
-            spl_const = SWEEP_LEVEL_DBFS + sensitivity_offset
+            # 2a. We have mic sensitivity, calculate TRUE absolute SPL
+            spl_const = base_offset + sensitivity_offset
             meas_db   = meas_db + spl_const
             print(f"🎚  SPL conversion: mag_db + {SWEEP_LEVEL_DBFS} dBFS "
-                  f"+ {sensitivity_offset:.3f} dB (mic sens) "
+                  f"+ {sensitivity_offset:.3f} dB (mic sens) + 3.01 dB (RMS) "
                   f"= mag_db + {spl_const:.3f} dB")
         else:
-            print("ℹ  No sensitivity offset — output is relative dB "
-                  "(not absolute dBSPL)")
+            # 2b. No mic calibration header found, but we STILL need the sweep offset
+            meas_db   = meas_db + base_offset
+            print(f"🎚  Relative SPL conversion: applied {base_offset:.3f} dB "
+                  f"({SWEEP_LEVEL_DBFS} dB sweep + 3.01 dB RMS). "
+                  f"Note: No absolute mic sensitivity applied.")
 
         print(f"   Measurement range: {meas_db.min():.1f} – {meas_db.max():.1f} dB")
 
-    # Load .mdat reference files (if no measurement was made, load them now)
-    if meas_f is None:
-        print(f"\n📁 Loading .mdat references from: {args.ref_dir}")
-        ref_raw = load_mdat_dir(args.ref_dir)
-    else:
-        print(f"\n📁 Loading .mdat references from: {args.ref_dir}")
-        ref_raw = load_mdat_dir(args.ref_dir)
+    # ── Load .mdat reference files ───────────────────────────────────────
+    print(f"\n📁 Loading .mdat references from: {args.ref_dir}")
+    ref_raw = load_mdat_dir(args.ref_dir)
     if not ref_raw:
         print("  (none found)")
 
@@ -831,7 +909,7 @@ def main():
             spl = octave_smooth(r["freqs"], spl, octave_frac)
         refs.append({**r, "spl_plot": spl})
 
-    # Plot + CSV
+    # ── Plot + CSV ───────────────────────────────────────────────────────
     print("\n🖼  Rendering plot …")
     plot_responses(meas_f, meas_db, refs, smooth_key, str(plot_path))
     save_csv(meas_f, meas_db, refs, str(csv_path))
@@ -862,7 +940,6 @@ def _selftest():
     sweep, inv_filter, playback = generate_ess()
 
     # ── Simulate a simple room: direct sound + 3 reflections ────────────
-    # Room IR: delta at t=0 (direct), then decaying reflections
     ir_room_len = int(0.5 * fs)
     ir_room = np.zeros(ir_room_len)
     ir_room[0]                  = 1.0         # direct sound (0 ms)
