@@ -188,13 +188,24 @@ def record_sweep(playback_signal, fs=SAMPLE_RATE, out_file=OUTPUT_WAV):
     print(f"▶  Output : {sd.query_devices(out_id)['name']}")
     print(f"🎙  Input  : {sd.query_devices(in_id)['name']}")
     print(f"⏳ Recording {len(playback_signal)/fs:.1f} s …")
-    rec = sd.playrec(playback_signal[:, None], samplerate=fs, channels=1, dtype="float32")
+    
+    # ── ALSA Hardware Fix ──────────────────────────────────────────────
+    # Raw USB hardware usually expects exactly 2 channels. 
+    # We duplicate the mono sweep to both Left and Right channels.
+    stereo_playback = np.column_stack((playback_signal, playback_signal))
+    
+    # Ask sounddevice for exactly 2 channels (input and output)
+    rec = sd.playrec(stereo_playback, samplerate=fs, channels=2, dtype="float32")
     sd.wait()
-    rec = rec[:, 0]
-    print(f"✅ Done. Peak: {20*np.log10(np.max(np.abs(rec))+1e-12):.1f} dBFS")
-    sf.write(out_file, rec, fs, subtype="PCM_24")
+    
+    # The UMIK-1 records identically to both channels; just grab the Left one
+    rec_mono = rec[:, 0]
+    
+    print(f"✅ Done. Peak: {20*np.log10(np.max(np.abs(rec_mono))+1e-12):.1f} dBFS")
+    sf.write(out_file, rec_mono, fs, subtype="PCM_24")
     print(f"💾 WAV saved → {out_file}")
-    return rec
+    
+    return rec_mono
 
 
 def load_wav(path):
