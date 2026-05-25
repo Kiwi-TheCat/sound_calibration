@@ -802,12 +802,15 @@ def main():
             print("❌ sounddevice unavailable "
                   "(install: pip install sounddevice + libportaudio2)")
         else:
-            # Force high real-time priority on Linux architectures to prevent buffer underruns
+            # Force high real-time priority on Linux architectures
             if sys.platform.startswith('linux'):
                 try:
-                    os.nice(-10) # Lower nice value = higher execution priority
+                    os.nice(-10) 
                 except PermissionError:
                     print("ℹ  Run with 'sudo' for real-time thread priority scheduling")
+            
+            # 👇 ADD THIS LINE TO FORCE RAW HARDWARE DEVICES 👇
+            sd.default.device = (1, 0)  # Output = Device 1 (USB Speaker), Input = Device 0 (UMIK-1)
             
             recording = record_sweep(playback, out_file=str(wav_path))
 
