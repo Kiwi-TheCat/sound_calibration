@@ -74,7 +74,7 @@ DEFAULT_DATA_DIR = "data"
 
 # IR time window — gate long enough for 2 Hz frequency resolution (1/0.5 s)
 IR_FADE_IN_S   = 0.002
-IR_GATE_S      = 0.200
+IR_GATE_S      = 0.500
 
 PLOT_FMIN = 10     # REW plots from 10 Hz even when sweep starts at 1 Hz
 PLOT_FMAX = 24_000
@@ -136,7 +136,7 @@ def generate_ess(
     sweep = np.sin(2.0 * np.pi * f1 * L * (np.exp(t / L) - 1.0))
 
     # Tukey window (2 % taper) to suppress end clicks without affecting spectrum
-    sweep *= sig.windows.tukey(N, alpha=0.02)
+    # sweep *= sig.windows.tukey(N, alpha=0.02)
 
     # Scale to target dBFS
     amplitude = 10.0 ** (level_dbfs / 20.0)
