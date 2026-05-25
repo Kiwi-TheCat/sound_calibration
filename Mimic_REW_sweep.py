@@ -136,7 +136,7 @@ def generate_ess(
     sweep = np.sin(2.0 * np.pi * f1 * L * (np.exp(t / L) - 1.0))
 
     # Tukey window (2 % taper) to suppress end clicks without affecting spectrum
-    # sweep *= sig.windows.tukey(N, alpha=0.02)
+    sweep *= sig.windows.tukey(N, alpha=0.02)
 
     # Scale to target dBFS
     amplitude = 10.0 ** (level_dbfs / 20.0)
