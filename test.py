@@ -127,18 +127,7 @@ def generate_ess(
     pre_s=SILENCE_PRE_S,
     post_s=SILENCE_POST_S,
 ):
-    """Generate an Exponential Sine Sweep and its analytical inverse filter.
-
-    The ESS is the sweep used by REW (and most professional measurement tools).
-    The inverse filter's convolution with the recorded response yields the
-    impulse response of the measured system.
-
-    Returns
-    -------
-    sweep        : float32 array, length N = T*fs  — the ESS signal at target level
-    inv_filter   : float64 array, length N          — analytical inverse filter
-    playback     : float32 array                    — sweep with pre/post silence
-    """
+    """Generate an Exponential Sine Sweep and its analytical inverse filter."""
     N = int(T * fs)
     t = np.linspace(0, T, N, endpoint=False)
 
@@ -146,7 +135,6 @@ def generate_ess(
     L = T / np.log(f2 / f1)
 
     # ── Forward ESS (Farina eq. 3) ──────────────────────────────────────
-    # x(t) = sin( 2π f1 L (e^(t/L) − 1) )
     sweep = np.sin(2.0 * np.pi * f1 * L * (np.exp(t / L) - 1.0))
 
     # Tukey window (2 % taper) to suppress end clicks without affecting spectrum
@@ -157,26 +145,22 @@ def generate_ess(
     sweep = (sweep / np.max(np.abs(sweep))) * amplitude
 
     # ── Analytical inverse filter (Farina eq. 10) ───────────────────────
-    # h_inv(t) = x(T−t) × e^(−t · ln(f2/f1) / T)
-    #
-    # The exponential envelope compensates the ESS's −3 dB/octave power
-    # spectrum, so that convolving a flat system's response gives a delta.
-    #
-    # Normalisation must use the PLAYED sweep (at target dBFS), not the
-    # unit-amplitude raw sweep — otherwise the deconvolved level is wrong
-    # by exactly 2 × |level_dbfs| dB, producing the constant offset seen
-    # when comparing against calibrated REW .mdat reference data.
     inv_mod = np.exp(-t * np.log(f2 / f1) / T)
     
-    # FIX: Use the attenuated 'sweep' (scaled to -12 dBFS), NOT the 1.0 amplitude sweep_raw
-    # This ensures the convolution peak for a perfect loopback is exactly 1.0 (0 dB).
+    # FIX: Use the attenuated 'sweep' (scaled to -12 dBFS) to ensure
+    # the deconvolution perfectly balances out to 0 dB gain.
     inv_filter = sweep[::-1] * inv_mod
 
     # Divide by the energy of the *played* sweep
-    # (Since inv_filter and played_energy now use the same scaled sweep, the math balances perfectly)
     played_energy = np.sum(sweep.astype(np.float64) ** 2)
-    inv_filter    = inv_filter / (played_energy + 1e-30) 
+    inv_filter    = inv_filter / (played_energy + 1e-30)
 
+    # ── Playback signal with silence padding ─────────────────────────────
+    pre  = np.zeros(int(pre_s  * fs), dtype=np.float32)
+    post = np.zeros(int(post_s * fs), dtype=np.float32)
+    playback = np.concatenate([pre, sweep.astype(np.float32), post])
+
+    return sweep.astype(np.float32), inv_filter.astype(np.float64), playback
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  AUDIO I/O
