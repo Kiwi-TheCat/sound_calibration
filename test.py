@@ -820,8 +820,8 @@ def main():
                 except PermissionError:
                     print("ℹ  Run with 'sudo' for real-time thread priority scheduling")
             
-            # 👇 ADD THIS LINE TO FORCE RAW HARDWARE DEVICES 👇
-            sd.default.device = (1, 0)  # Output = Device 1 (USB Speaker), Input = Device 0 (UMIK-1)
+            # 👇 FIX: The tuple order MUST be (input, output) 👇
+            sd.default.device = (0, 1)  # Input = 0 (UMIK-1), Output = 1 (USB Speaker)
             
             recording = record_sweep(playback, out_file=str(wav_path))
 
