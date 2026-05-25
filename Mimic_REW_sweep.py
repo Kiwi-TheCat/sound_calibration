@@ -105,7 +105,7 @@ COLOUR_REF_CYCLE = ["#e74c3c", "#3498db", "#e67e22", "#9b59b6", "#1abc9c", "#f1c
 SWEEP_FILES = {
     "1": {
         "label": "New sweep  (256kMeasSweep_0_to_20000_-12_dBFS_48k_Float_LR.wav)",
-        "path":  "sound_calibration file/256kMeasSweep_0_to_20000_-12_dBFS_48k_Float_LR.wav",
+        "path":  "256kMeasSweep_0_to_20000_-12_dBFS_48k_Float_LR.wav",
     },
     "2": {
         "label": "Generated ESS sweep  (built-in Farina log-chirp)",
