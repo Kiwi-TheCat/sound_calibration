@@ -148,12 +148,20 @@ def record_sweep_on_channel(playback_mono: np.ndarray,
         with sd.Stream(samplerate=fs, channels=(1, 2), dtype="float32",
                        device=device, blocksize=blocksize, latency="high",
                        callback=callback):
-            sd.wait()
+            # Keep stream alive until all samples are played/recorded
+            while playback_idx[0] < len(stereo) or rec_idx[0] < len(stereo):
+                sd.sleep(int(blocksize / fs * 1000))  # Sleep for one block duration
     except Exception as e:
         print(f"   ⚠  Stream error: {e}")
         raise
 
     rec = rec_buffer[:rec_idx[0], 0]
+    
+    # Safety check: ensure we captured audio
+    if len(rec) == 0:
+        print("   ⚠  No audio captured. Check device connections and levels.")
+        return np.zeros(len(stereo), dtype=np.float32)
+    
     peak = 20 * np.log10(np.max(np.abs(rec)) + 1e-12)
     print(f"        peak {peak:+.1f} dBFS")
     if peak > -1.0:
