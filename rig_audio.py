@@ -117,49 +117,33 @@ def record_sweep_on_channel(playback_mono: np.ndarray,
     out_name = sd.query_devices(out_idx)['name']   if out_idx   is not None else "(default)"
     print(f"   ▶ {channel:2s}  in={in_name}  out={out_name}")
 
-    # ── Buffered playback/record using sd.Stream (avoids ALSA underrun on Linux) ──
-    # blocksize: Chunk size for processing. Larger (4096) reduces underrun but increases latency.
-    # latency: 'high' adds buffering for robustness on resource-constrained systems.
-    blocksize = 4096
-    rec_buffer = np.zeros((len(stereo), 1), dtype=np.float32)
-    playback_idx = [0]
-    rec_idx = [0]
-
-    def callback(indata, outdata, frames, time, status):
-        """Stream callback: fill output, capture input."""
-        if status:
-            print(f"   ⚠  Stream status: {status}")
-        
-        # Output: fill with stereo signal
-        end_idx = min(playback_idx[0] + frames, len(stereo))
-        nframes = end_idx - playback_idx[0]
-        outdata[:nframes, :] = stereo[playback_idx[0]:end_idx, :]
-        if nframes < frames:
-            outdata[nframes:, :] = 0
-        playback_idx[0] = end_idx
-        
-        # Input: capture mono signal
-        end_rec = min(rec_idx[0] + frames, len(rec_buffer))
-        nrec = end_rec - rec_idx[0]
-        rec_buffer[rec_idx[0]:end_rec, 0] = indata[:nrec, 0]
-        rec_idx[0] = end_rec
-
+        # ── Buffered playback/record (ALSA-safe approach for Linux) ──
+    # Use blocking playrec with larger buffer to avoid underruns
+    blocksize = 8192  # Larger block for ALSA stability
+    
+    # Add extra padding to ensure we capture all audio after sweep ends
+    post_samples = int(rew.SILENCE_POST_S * fs)
+    total_with_post = len(stereo) + post_samples
+    
+    # Pad the stereo signal with silence at the end
+    stereo_padded = np.vstack([stereo, np.zeros((post_samples, 2), dtype=np.float32)])
+    
+    print(f"   ⏳ Playing & recording {len(stereo_padded)/fs:.1f} s …")
+    
     try:
-        with sd.Stream(samplerate=fs, channels=(1, 2), dtype="float32",
-                       device=device, blocksize=blocksize, latency="high",
-                       callback=callback):
-            # Keep stream alive until all samples are played/recorded
-            while playback_idx[0] < len(stereo) or rec_idx[0] < len(stereo):
-                sd.sleep(int(blocksize / fs * 1000))  # Sleep for one block duration
+        # Use blocking playrec - simpler and more reliable on Linux ALSA
+        rec_full = sd.playrec(stereo_padded, samplerate=fs, channels=1,
+                              dtype="float32", device=device, blocksize=blocksize)
+        sd.wait()
     except Exception as e:
-        print(f"   ⚠  Stream error: {e}")
+        print(f"   ⚠  Playback error: {e}")
         raise
 
-    rec = rec_buffer[:rec_idx[0], 0]
+    rec = rec_full[:, 0]
     
     # Safety check: ensure we captured audio
-    if len(rec) == 0:
-        print("   ⚠  No audio captured. Check device connections and levels.")
+    if len(rec) == 0 or np.max(np.abs(rec)) < 1e-10:
+        print("   ⚠  No audio captured. Check device connections and mic level.")
         return np.zeros(len(stereo), dtype=np.float32)
     
     peak = 20 * np.log10(np.max(np.abs(rec)) + 1e-12)
