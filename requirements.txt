@@ -3,3 +3,23 @@ scipy>=1.10.0
 sounddevice>=0.4.6
 matplotlib>=3.7.0
 soundfile>=0.12.1
+
+
+# Rig audio calibration — Python dependencies
+# Install with:  pip install -r requirements.txt
+# Linux audio:   sudo apt-get install libportaudio2 portaudio19-dev
+ 
+# Audio I/O
+sounddevice>=0.4.6
+soundfile>=0.12.1
+ 
+# Numerics / DSP
+numpy>=1.24.0
+scipy>=1.11.0
+ 
+# Plotting
+matplotlib>=3.7.0
+ 
+# Data storage
+pandas>=2.0.0
+pyarrow>=14.0.0        # parquet backend for pandas
