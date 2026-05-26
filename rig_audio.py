@@ -117,16 +117,49 @@ def record_sweep_on_channel(playback_mono: np.ndarray,
     out_name = sd.query_devices(out_idx)['name']   if out_idx   is not None else "(default)"
     print(f"   ▶ {channel:2s}  in={in_name}  out={out_name}")
 
-    rec = sd.playrec(stereo, samplerate=fs, channels=1,
-                     dtype="float32", device=device)
-    sd.wait()
-    rec = rec[:, 0]
+    # ── Buffered playback/record using sd.Stream (avoids ALSA underrun on Linux) ──
+    # blocksize: Chunk size for processing. Larger (4096) reduces underrun but increases latency.
+    # latency: 'high' adds buffering for robustness on resource-constrained systems.
+    blocksize = 4096
+    rec_buffer = np.zeros((len(stereo), 1), dtype=np.float32)
+    playback_idx = [0]
+    rec_idx = [0]
+
+    def callback(indata, outdata, frames, time, status):
+        """Stream callback: fill output, capture input."""
+        if status:
+            print(f"   ⚠  Stream status: {status}")
+        
+        # Output: fill with stereo signal
+        end_idx = min(playback_idx[0] + frames, len(stereo))
+        nframes = end_idx - playback_idx[0]
+        outdata[:nframes, :] = stereo[playback_idx[0]:end_idx, :]
+        if nframes < frames:
+            outdata[nframes:, :] = 0
+        playback_idx[0] = end_idx
+        
+        # Input: capture mono signal
+        end_rec = min(rec_idx[0] + frames, len(rec_buffer))
+        nrec = end_rec - rec_idx[0]
+        rec_buffer[rec_idx[0]:end_rec, 0] = indata[:nrec, 0]
+        rec_idx[0] = end_rec
+
+    try:
+        with sd.Stream(samplerate=fs, channels=(1, 2), dtype="float32",
+                       device=device, blocksize=blocksize, latency="high",
+                       callback=callback):
+            sd.wait()
+    except Exception as e:
+        print(f"   ⚠  Stream error: {e}")
+        raise
+
+    rec = rec_buffer[:rec_idx[0], 0]
     peak = 20 * np.log10(np.max(np.abs(rec)) + 1e-12)
     print(f"        peak {peak:+.1f} dBFS")
     if peak > -1.0:
         print("        ⚠  near clip — reduce mic gain or sweep level")
     return rec
-
+    
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  MEASUREMENT PIPELINE  (ESS → IR → FFT → log-grid → smoothing)
