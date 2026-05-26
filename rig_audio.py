@@ -116,41 +116,20 @@ def record_sweep_on_channel(playback_mono: np.ndarray,
     in_name  = sd.query_devices(input_idx)['name'] if input_idx is not None else "(default)"
     out_name = sd.query_devices(out_idx)['name']   if out_idx   is not None else "(default)"
     print(f"   ▶ {channel:2s}  in={in_name}  out={out_name}")
+    
+    rec = sd.playrec(stereo, samplerate=fs, channels=1, dtype="float64", device=device)
+    sd.wait()
+    rec = rec.flatten()
 
-        # ── Buffered playback/record (ALSA-safe approach for Linux) ──
-    # Use blocking playrec with larger buffer to avoid underruns
-    blocksize = 8192  # Larger block for ALSA stability
-    
-    # Add extra padding to ensure we capture all audio after sweep ends
-    post_samples = int(rew.SILENCE_POST_S * fs)
-    total_with_post = len(stereo) + post_samples
-    
-    # Pad the stereo signal with silence at the end
-    stereo_padded = np.vstack([stereo, np.zeros((post_samples, 2), dtype=np.float32)])
-    
-    print(f"   ⏳ Playing & recording {len(stereo_padded)/fs:.1f} s …")
-    
-    try:
-        # Use blocking playrec - simpler and more reliable on Linux ALSA
-        rec_full = sd.playrec(stereo_padded, samplerate=fs, channels=1,
-                              dtype="float32", device=device, blocksize=blocksize)
-        sd.wait()
-    except Exception as e:
-        print(f"   ⚠  Playback error: {e}")
-        raise
-
-    rec = rec_full[:, 0]
-    
-    # Safety check: ensure we captured audio
-    if len(rec) == 0 or np.max(np.abs(rec)) < 1e-10:
-        print("   ⚠  No audio captured. Check device connections and mic level.")
+    if len(rec) == 0:
+        print("   ⚠  No audio captured. Check device connections.")
         return np.zeros(len(stereo), dtype=np.float32)
-    
+
     peak = 20 * np.log10(np.max(np.abs(rec)) + 1e-12)
     print(f"        peak {peak:+.1f} dBFS")
     if peak > -1.0:
         print("        ⚠  near clip — reduce mic gain or sweep level")
-    return rec
+    return rec.astype(np.float32)
     
 
 # ═══════════════════════════════════════════════════════════════════════════
