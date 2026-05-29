@@ -1,29 +1,23 @@
 #!/usr/bin/env python3
 """
-calibrate_speaker.py — Rig speaker calibration to a 78 dBSPL target.
+calibrate_speaker.py — Rig speaker measurement (script 4, no auto-adjust).
 
 Manually executed at each rig with:
         python3 calibrate_speaker.py
 
 Pre-requisites:
-  • <rig_id>_mic_calibration.txt produced by calibrate_mic.py must exist in
-    the local directory.
-  • The rig's mic must be the system default audio input (the script reads
-    from sd.default.device[1] — sounddevice docs say the default is
-    (input, output), so [1] is the output index and [0] is input; we
-    therefore use [0] for the input we listen on).
+  • data/<rig_id>_mic_calibration.txt produced by calibrate_mic.py.
+  • The standard sweep in sample_data/256k…mono.wav.
 
 Workflow:
-  1. Locate the rig mic-cal file in CWD, parse rig_id from the filename
-  2. Sweep L / R / L+R with the default input → dBSPL per channel (BEFORE)
-  3. Compute mean dBSPL for L+R over 400 Hz–10 kHz
-  4. If outside 78 ± 0.1 dB, scale the system volume by 10**((78−mean)/20)
-     and re-sweep → dBSPL per channel (AFTER); otherwise AFTER = BEFORE
-  5. Build a 7-col DataFrame:  freq, L_before, R_before, LR_before,
-                                     L_after,  R_after,  LR_after  (all dBSPL)
-  6. Save  <rig_id>_speaker_calibration_<YYYY_MM_DD_HH_MM>.parquet
-  7. rsync that file to ogma:speaker_calibration/   (RSYNC_DEST below)
-  8. Plot the AFTER curves to a sibling .png and open it in the default viewer
+  1. Locate the rig mic-cal file in data/, parse rig_id from the filename
+  2. Pick OUTPUT (speakers) + INPUT (rig mic) devices
+  3. Sweep L / R / L+R, apply each channel's offset → dBSPL per channel
+  4. Report mean dBSPL for L+R over the target band (informational only)
+  5. Build a 4-col DataFrame:  freq, L_dBSPL, R_dBSPL, LR_dBSPL
+  6. Save  data/<rig_id>_speaker_calibration_<YYYY_MM_DD_HH_MM>.parquet
+  7. rsync that file to RSYNC_DEST (non-fatal if it fails)
+  8. Plot the SPL curves to a sibling .png and open it in the default viewer
 """
 
 from __future__ import annotations
@@ -40,21 +34,19 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-import Mimic_REW_sweep as rew
-import rig_audio as ra
+import sound_calibration_utility as scu
 
 # ── Tunables ─────────────────────────────────────────────────────────────
-TARGET_SPL_DB        = 78.0
-TARGET_TOLERANCE_DB  = 0.1
-TARGET_BAND_HZ       = (400.0, 10_000.0)
-RSYNC_DEST           = "ogma:speaker_calibration/"   # adjust per deployment
+TARGET_SPL_DB  = 78.0
+TARGET_BAND_HZ = (400.0, 10_000.0)
+RSYNC_DEST     = "ogma:speaker_calibration/"   # adjust per deployment
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  RIG CAL FILE DISCOVERY
 # ═══════════════════════════════════════════════════════════════════════════
 
-def find_rig_mic_cal(directory: str | Path = ".") -> Optional[Path]:
+def find_rig_mic_cal(directory: str | Path = scu.DATA_DIR) -> Optional[Path]:
     """Return newest *_mic_calibration.txt in `directory`, or None."""
     candidates = sorted(Path(directory).glob("*_mic_calibration.txt"),
                         key=lambda p: p.stat().st_mtime)
@@ -74,36 +66,41 @@ def rig_id_from_path(path: Path) -> str:
     return stem[:-len("_mic_calibration.txt")]
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  MEASUREMENT WITH PER-CHANNEL OFFSETS
-# ═══════════════════════════════════════════════════════════════════════════
-
-def measure_with_rig_cal(input_idx: Optional[int], rig_cal: dict) -> dict:
-    """Run L/R/LR sweeps with the default mic, apply each channel's offset.
-
-    `rig_cal` is {'freqs': np.ndarray, 'L': ..., 'R': ..., 'LR': ...}.
-    Returns {ch: {'freqs', 'dbfs', 'spl'}} with dBSPL filled in per channel.
-    """
-    print("🔊 Generating ESS sweep …")
-    sweep, inv_filter, playback = rew.generate_ess()
-
-    results = {}
-    for ch in ra.CHANNELS:
-        print(f"\n   Channel {ch} ({ra.CH_PRETTY[ch]}):")
-        f, dbfs, _ = ra.measure_channel(
-            ch, sweep, inv_filter, playback,
-            input_idx, mic_cal=None, smoothing=ra.SMOOTHING_OCT,
-        )
-        off_on_f = np.interp(f, rig_cal["freqs"], rig_cal[ch])
-        spl = dbfs + off_on_f
-        results[ch] = {"freqs": f, "dbfs": dbfs, "spl": spl}
-    return results
-
-
 def band_mean(freqs: np.ndarray, values: np.ndarray,
               band: tuple[float, float]) -> float:
     m = (freqs >= band[0]) & (freqs <= band[1]) & np.isfinite(values)
     return float(np.mean(values[m])) if m.any() else float("nan")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  MEASUREMENT WITH PER-CHANNEL OFFSETS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def measure_with_rig_cal(output_idx: Optional[int],
+                         input_idx: Optional[int],
+                         rig_cal: dict) -> dict:
+    """Run L/R/LR sweeps and apply each channel's offset.
+
+    `rig_cal` is {'freqs', 'L', 'R', 'LR'}.
+    Returns {ch: {'freqs', 'dbfs', 'spl'}} with dBSPL filled in per channel.
+    """
+    print(f"🔧 Building inverse filter from {scu.STANDARD_SWEEP.name} …")
+    sweep, inv_filter = scu.build_inverse_filter(scu.STANDARD_SWEEP)
+
+    results = {}
+    for ch in scu.CHANNELS:
+        print(f"\n   Channel {ch} ({scu.CH_PRETTY[ch]}):")
+        f, dbfs, _ = scu.measure_channel(
+            ch, sweep, inv_filter, output_idx, input_idx,
+            mic_cal=None, smoothing=scu.SMOOTHING_OCT,
+        )
+        off_on_f = np.interp(f, rig_cal["freqs"], rig_cal[ch])
+        results[ch] = {"freqs": f, "dbfs": dbfs, "spl": dbfs + off_on_f}
+
+    for ch in results:
+        print(f"  {ch} raw dBFS mean ({TARGET_BAND_HZ[0]:.0f}-{TARGET_BAND_HZ[1]:.0f}): "
+              f"{band_mean(results[ch]['freqs'], results[ch]['dbfs'], TARGET_BAND_HZ):.2f}")
+    return results
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -123,26 +120,24 @@ def rsync_to_dest(local_path: Path, dest: str = RSYNC_DEST) -> bool:
     return True
 
 
-def plot_after(results: dict, png_path: Path, title: str) -> None:
+def plot_results(results: dict, png_path: Path, title: str) -> None:
     fig, ax = plt.subplots(figsize=(14, 7))
     fig.patch.set_facecolor("#1a1a1a")
     ax.set_facecolor("#1e1e1e")
     ax.grid(True, which="major", color="#333", lw=0.7)
     ax.grid(True, which="minor", color="#262626", lw=0.4, ls=":")
 
-    for ch in ra.CHANNELS:
-        f = results[ch]["freqs"]; y = results[ch]["spl"]
-        ax.plot(f, y, color=ra.CH_COLOUR[ch], lw=1.9,
-                label=f"{ch}  ({ra.CH_PRETTY[ch]})")
+    for ch in scu.CHANNELS:
+        ax.plot(results[ch]["freqs"], results[ch]["spl"],
+                color=scu.CH_COLOUR[ch], lw=1.9,
+                label=f"{ch}  ({scu.CH_PRETTY[ch]})")
 
-    # Target line + band shading
     ax.axhline(TARGET_SPL_DB, color="#bbb", lw=1.0, ls="--", alpha=0.7,
                label=f"Target {TARGET_SPL_DB} dBSPL")
-    ax.axvspan(TARGET_BAND_HZ[0], TARGET_BAND_HZ[1],
-               alpha=0.07, color="#ffffff",
+    ax.axvspan(TARGET_BAND_HZ[0], TARGET_BAND_HZ[1], alpha=0.07, color="#ffffff",
                label=f"Target band {TARGET_BAND_HZ[0]:.0f}–{TARGET_BAND_HZ[1]:.0f} Hz")
 
-    rew._freq_axis(ax)
+    scu.freq_axis(ax)
     ax.set_xlabel("Frequency (Hz)", color="#ddd", fontsize=12)
     ax.set_ylabel("SPL (dB)",       color="#ddd", fontsize=12)
     ax.set_title(title, color="#fff", fontsize=14, fontweight="bold", pad=12)
@@ -164,116 +159,74 @@ def plot_after(results: dict, png_path: Path, title: str) -> None:
 
 def main() -> int:
     print("═" * 65)
-    print("  Rig Speaker Calibration")
+    print("  Rig Speaker Measurement  (no auto-adjust)")
     print("═" * 65)
 
-    # ── 1. Find rig-cal file ─────────────────────────────────────────────
-    cal_path = find_rig_mic_cal(".")
+    # ── 1. Find rig-cal file in data/ ────────────────────────────────────
+    cal_path = find_rig_mic_cal(scu.DATA_DIR)
     if cal_path is None:
-        print("\n❌ No *_mic_calibration.txt found in CWD.")
+        print(f"\n❌ No *_mic_calibration.txt found in {scu.DATA_DIR}/.")
         print("   Run calibrate_mic.py first to produce it.")
         return 1
     rig_id = rig_id_from_path(cal_path)
     print(f"📐 Rig mic cal: {cal_path.name}  (rig_id = {rig_id})")
 
-    freqs_cal, off_L, off_R, off_LR, meta = ra.read_rig_mic_cal(cal_path)
+    freqs_cal, off_L, off_R, off_LR, meta = scu.read_rig_mic_cal(cal_path)
     rig_cal = {"freqs": freqs_cal, "L": off_L, "R": off_R, "LR": off_LR}
     if meta:
         print(f"   Generated: {meta.get('Calibration date', '?')}")
         print(f"   Reference: {meta.get('Reference UMIK cal', '?')}")
 
-    # ── 2. Default input device ──────────────────────────────────────────
-    if not ra.HAS_SD:
+    # ── 2. Pick output + input devices ───────────────────────────────────
+    if not scu.HAS_SD:
         print("❌ sounddevice unavailable.")
         return 1
-    import sounddevice as sd
-    # sd.default.device is (input, output); [0] is input.
-    in_idx = sd.default.device[0]
-    if in_idx is None or in_idx < 0:
-        print("❌ No default input device set. Configure the rig mic as default.")
-        return 1
-    print(f"🎙  Default input: [{in_idx}] {sd.query_devices(in_idx)['name']}")
+    scu.list_audio_devices()
+    output_idx, output_name = scu.prompt_output_device(
+        "Which device drives the SPEAKERS?")
+    input_idx, input_name = scu.prompt_input_device(
+        "Which device is the RIG mic?")
+    print(f"🔊 Output: [{output_idx}] {output_name}")
+    print(f"🎙  Input : [{input_idx}] {input_name}")
 
-    # ── 3. Pass 1 — BEFORE ──────────────────────────────────────────────
+    # ── 3. Single measurement pass ───────────────────────────────────────
     print("\n" + "─" * 65)
-    print("Pass 1/?  —  initial measurement")
+    print("Measurement pass")
     print("─" * 65)
-    before = measure_with_rig_cal(in_idx, rig_cal)
+    results = measure_with_rig_cal(output_idx, input_idx, rig_cal)
 
-    lr_mean_before = band_mean(before["LR"]["freqs"], before["LR"]["spl"],
-                               TARGET_BAND_HZ)
-    print(f"\n📊 L+R mean SPL  ({TARGET_BAND_HZ[0]:.0f}-{TARGET_BAND_HZ[1]:.0f} Hz): "
-          f"{lr_mean_before:.3f} dB    (target {TARGET_SPL_DB} ± {TARGET_TOLERANCE_DB})")
+    lr_mean = band_mean(results["LR"]["freqs"], results["LR"]["spl"], TARGET_BAND_HZ)
+    print(f"\n📊 L+R mean SPL ({TARGET_BAND_HZ[0]:.0f}-{TARGET_BAND_HZ[1]:.0f} Hz): "
+          f"{lr_mean:.3f} dB    (reference target {TARGET_SPL_DB} dB — not adjusted)")
 
-    # ── 4. Adjust volume if needed; Pass 2 — AFTER ───────────────────────
-    volume_before = ra.get_system_volume()
-    volume_after  = volume_before
-    after         = before          # default if no adjustment needed
-
-    if abs(lr_mean_before - TARGET_SPL_DB) <= TARGET_TOLERANCE_DB:
-        print("✅ Already within tolerance — no volume change.")
-    else:
-        if volume_before is None:
-            print("❌ Could not read system volume — cannot auto-adjust.")
-            print("   Set the system volume manually and re-run.")
-            return 1
-        dV_db = TARGET_SPL_DB - lr_mean_before
-        ratio = 10.0 ** (dV_db / 20.0)
-        volume_after = volume_before * ratio
-        print(f"🎚  Volume: {volume_before:.4f}  ×  10^({dV_db:+.2f}/20)  "
-              f"=  {volume_after:.4f}")
-        if not ra.set_system_volume(volume_after):
-            print("❌ Failed to set system volume.")
-            return 1
-        # Confirm what the system actually accepted (may be clamped)
-        v_now = ra.get_system_volume()
-        if v_now is not None:
-            print(f"   System volume now reads: {v_now:.4f}")
-            volume_after = v_now
-
-        print("\n" + "─" * 65)
-        print("Pass 2/2  —  after volume adjustment")
-        print("─" * 65)
-        after = measure_with_rig_cal(in_idx, rig_cal)
-        lr_mean_after = band_mean(after["LR"]["freqs"], after["LR"]["spl"],
-                                  TARGET_BAND_HZ)
-        err = lr_mean_after - TARGET_SPL_DB
-        print(f"\n📊 L+R mean SPL after: {lr_mean_after:.3f} dB  "
-              f"(error {err:+.3f} dB)")
-        if abs(err) > TARGET_TOLERANCE_DB:
-            print(f"   ⚠  Did not converge within ±{TARGET_TOLERANCE_DB} dB. "
-                  f"Volume curve may be nonlinear; re-run if needed.")
-
-    # ── 5. Build dataframe (common grid = before["LR"]["freqs"]) ────────
-    grid = before["LR"]["freqs"]
-    def _on_grid(d, ch): return np.interp(grid, d[ch]["freqs"], d[ch]["spl"])
+    # ── 4. Build dataframe (common grid = results["LR"]["freqs"]) ───────
+    grid = results["LR"]["freqs"]
+    def _on_grid(ch):
+        return np.interp(grid, results[ch]["freqs"], results[ch]["spl"])
     df = pd.DataFrame({
-        "frequency_Hz":     grid,
-        "L_before_dBSPL":   _on_grid(before, "L"),
-        "R_before_dBSPL":   _on_grid(before, "R"),
-        "LR_before_dBSPL":  _on_grid(before, "LR"),
-        "L_after_dBSPL":    _on_grid(after,  "L"),
-        "R_after_dBSPL":    _on_grid(after,  "R"),
-        "LR_after_dBSPL":   _on_grid(after,  "LR"),
+        "frequency_Hz": grid,
+        "L_dBSPL":      _on_grid("L"),
+        "R_dBSPL":      _on_grid("R"),
+        "LR_dBSPL":     _on_grid("LR"),
     })
 
-    # ── 6. Save parquet  <rig_id>_speaker_calibration_<YYYY_MM_DD_HH_MM>.parquet ─
+    # ── 5. Save parquet to data/ ─────────────────────────────────────────
     stamp = _dt.datetime.now().strftime("%Y_%m_%d_%H_%M")
     base = f"{rig_id}_speaker_calibration_{stamp}"
-    parquet_path = Path(f"{base}.parquet")
+    scu.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    parquet_path = scu.DATA_DIR / f"{base}.parquet"
     df.to_parquet(parquet_path, index=False)
     print(f"\n💾 Parquet saved → {parquet_path}")
 
-    # ── 7. rsync ─────────────────────────────────────────────────────────
-    rsync_to_dest(parquet_path)         # warning printed if it fails; non-fatal
+    # ── 6. rsync (non-fatal) ─────────────────────────────────────────────
+    rsync_to_dest(parquet_path)
 
-    # ── 8. Plot AFTER + open in default viewer ───────────────────────────
-    png_path = Path(f"{base}.png")
-    plot_after(after, png_path,
-               f"Rig {rig_id} — calibrated speaker response  ({stamp})")
+    # ── 7. Plot + open in default viewer ─────────────────────────────────
+    png_path = scu.DATA_DIR / f"{base}.png"
+    plot_results(results, png_path,
+                 f"Rig {rig_id} — speaker response  ({stamp})")
     print(f"📊 Plot → {png_path}")
-    ra.open_file_default(png_path)
-
+    scu.open_file_default(png_path)
     return 0
 
 
