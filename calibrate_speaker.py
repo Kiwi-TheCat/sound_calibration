@@ -10,7 +10,7 @@ calibration cycle immediately, then stays resident and re-runs that cycle
 automatically at 02:00 every day (no further user input required).
 
 Pre-requisites:
-  • data/<rig_id>_mic_calibration.txt produced by calibrate_mic.py.
+  • rig_calibration_file/<rig_id>_mic_calibration.txt produced by calibrate_mic.py.
   • The standard sweep in sample_data/256k…mono.wav.
   • PulseAudio / PipeWire `pactl` available (Ubuntu) for volume control.
   • ~/.dbconf with a [client] section (host/user/passwd/port) for DB logging.
@@ -53,6 +53,10 @@ TARGET_SPL_DB  = 78.0
 TARGET_BAND_HZ = (1, 20_000.0)
 RSYNC_DEST     = "ogma:speaker_calibration/"   # adjust per deployment
 
+# Directory holding the rig mic-calibration .txt files (written by
+# calibrate_mic.py).  Lives in the project root alongside this script.
+RIG_CAL_DIR    = Path(__file__).resolve().parent / "rig_mic_calibration_file"
+
 # White-noise volume calibration
 WN_DURATION_S      = 6.0     # length of each white-noise burst (seconds)
 WN_WARMUP_S        = 1     # discard this much at the start of each recording
@@ -74,7 +78,7 @@ AMPLITUDE_RATIO_TO_MATLAB = 0.5  # MATLAB WhiteNoise_fm is ±0.5 peak, so matche
 #  RIG CAL FILE DISCOVERY
 # ═══════════════════════════════════════════════════════════════════════════
 
-def find_rig_mic_cal(directory: str | Path = scu.DATA_DIR) -> Optional[Path]:
+def find_rig_mic_cal(directory: str | Path = RIG_CAL_DIR) -> Optional[Path]:
     """Return newest *_mic_calibration.txt in `directory`, or None."""
     candidates = sorted(Path(directory).glob("*_mic_calibration.txt"),
                         key=lambda p: p.stat().st_mtime)
@@ -84,6 +88,47 @@ def find_rig_mic_cal(directory: str | Path = scu.DATA_DIR) -> Optional[Path]:
         print(f"⚠  Multiple *_mic_calibration.txt files found; "
               f"using newest: {candidates[-1].name}")
     return candidates[-1]
+
+
+def list_rig_mic_cals(directory: str | Path = RIG_CAL_DIR) -> list[Path]:
+    """Return all *_mic_calibration.txt files in `directory`, newest first."""
+    return sorted(Path(directory).glob("*_mic_calibration.txt"),
+                  key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def prompt_rig_mic_cal(directory: str | Path = RIG_CAL_DIR) -> Optional[Path]:
+    """Show the available rig mic-calibration files and let the user pick one.
+
+    Always lists every *_mic_calibration.txt in `directory` (newest first)
+    with an index — even when only one file is present — and reads a
+    selection from stdin.  Pressing Enter takes the default (index 0, the
+    newest file).  Returns the chosen Path, or None if the directory holds no
+    calibration files.
+    """
+    candidates = list_rig_mic_cals(directory)
+    if not candidates:
+        return None
+
+    print(f"\nRig mic-calibration files in {Path(directory)}/:")
+    for i, p in enumerate(candidates):
+        stamp = _dt.datetime.fromtimestamp(p.stat().st_mtime).strftime(
+            "%Y-%m-%d %H:%M")
+        marker = "  (newest)" if i == 0 else ""
+        print(f"  [{i}] {p.name}   ({stamp}){marker}")
+
+    while True:
+        sel = input(f"Select rig mic cal file [0-{len(candidates) - 1}] "
+                    f"(Enter = 0): ").strip()
+        if sel == "":
+            return candidates[0]
+        try:
+            idx = int(sel)
+        except ValueError:
+            print("  ⚠  Please enter a number.")
+            continue
+        if 0 <= idx < len(candidates):
+            return candidates[idx]
+        print(f"  ⚠  Out of range; pick 0-{len(candidates) - 1}.")
 
 
 def rig_id_from_path(path: Path) -> str:
@@ -242,12 +287,16 @@ def play_and_record_white_noise(channel: str, duration_s: float, fs: int,
     n = int(round(duration_s * fs))
     play = np.zeros((n, 2), dtype=np.float64)
 
-    # Randon draw once shared between two channels
-    mono = generate_white_noise(duration_s, fs)
+    # Two INDEPENDENT white-noise draws — one per channel — so the L and R
+    # feeds are uncorrelated.  For stereo (LR) the speakers radiate
+    # independent signals whose powers add at the mic (≈ +3 dB over a single
+    # channel for matched levels), so stereo measures louder than either
+    # channel alone, and it mirrors real two-channel playback rather than a
+    # single coherent mono feed driven into both channels.
     if channel in ("L", "LR"):
-        play[:, 0] = mono
+        play[:, 0] = generate_white_noise(duration_s, fs)
     if channel in ("R", "LR"):
-        play[:, 1] = mono
+        play[:, 1] = generate_white_noise(duration_s, fs)
 
     rec = sd.playrec(play, samplerate=fs, channels=1,
                      device=(input_idx, output_idx), dtype="float32")
@@ -602,10 +651,10 @@ def main() -> int:
     print("  Rig Speaker Measurement + Volume Calibration")
     print("═" * 65)
 
-    # ── 1. Find rig-cal file in data/ ────────────────────────────────────
-    cal_path = find_rig_mic_cal(scu.DATA_DIR)
+    # ── 1. Select rig-cal file from rig_calibration_file/ ────────────────
+    cal_path = prompt_rig_mic_cal(RIG_CAL_DIR)
     if cal_path is None:
-        print(f"\n❌ No *_mic_calibration.txt found in {scu.DATA_DIR}/.")
+        print(f"\n❌ No *_mic_calibration.txt found in {RIG_CAL_DIR}/.")
         print("   Run calibrate_mic.py first to produce it.")
         return 1
     rig_id = rig_id_from_path(cal_path)

@@ -18,7 +18,8 @@ Workflow:
   3. Sweep L / R / L+R through the CALIBRATED mic   → dBSPL curves
   4. Sweep L / R / L+R through the UNCALIBRATED mic → raw dBFS curves
   5. Per channel:  offset(f) = SPL_ref(f) − dBFS_test(f)
-  6. Write  data/<rig_id>_mic_calibration.txt   (f, off_L, off_R, off_LR)
+  6. Write  rig_mic_calibration_file/<rig_id>_mic_calibration.txt
+      (f, off_L, off_R, off_LR)
 
 The offset absorbs the sweep level, UMIK sensitivity, and the test mic's
 frequency response, so downstream the user just does:
@@ -28,6 +29,7 @@ frequency response, so downstream the user just does:
 from __future__ import annotations
 import datetime as _dt
 import sys
+from pathlib import Path
 
 import numpy as np
 
@@ -134,8 +136,10 @@ def main() -> int:
         print("   ⚠  Large spread — check both mics are firmly mounted and "
               "the room was quiet during the sweeps.")
 
-    # ── 8. Write cal file to data/ ───────────────────────────────────────
-    out_path = scu.DATA_DIR / f"{rig_id}_mic_calibration.txt"
+    # ── 8. Write cal file to rig_mic_calibration_file/ ──────────────────
+    out_dir = Path(__file__).resolve().parent / "rig_mic_calibration_file"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{rig_id}_mic_calibration.txt"
     scu.write_rig_mic_cal(out_path, rig_id, freqs,
                           offsets["L"], offsets["R"], offsets["LR"],
                           ref_cal_file=str(umik_path))
