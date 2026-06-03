@@ -389,7 +389,7 @@ def insert_calibration_result(rigid: Optional[int],
             host=cfg["host"],
             user=cfg["user"],
             password=cfg["passwd"],
-            database="test",
+            database="met",
             port=int(cfg.get("port", 3306)),
         )
         cur = con.cursor()
