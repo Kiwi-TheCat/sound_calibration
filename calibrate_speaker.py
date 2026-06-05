@@ -14,7 +14,7 @@ Pre-requisites:
   • The standard sweep in sample_data/256k…mono.wav.
   • PulseAudio / PipeWire `pactl` available (Ubuntu) for volume control.
   • ~/.dbconf with a [client] section (host/user/passwd/port) for DB logging.
-
+ß
 One calibration cycle:
   A) Sweep measurement with per-channel offsets (existing code, adapted from calibrate_mic.py):
      1. Build inverse filter, sweep L / R / L+R, apply per-channel offsets.
@@ -23,8 +23,8 @@ One calibration cycle:
      1. Play + record white noise on L+R, L-only and R-only.
      2. Measure absolute dBSPL of each.
      3. Test #1  — stereo (L+R) must be 78 dBSPL ± 1 dB        → pass / fail
-        Test #2  — |L − R| must be ≤ 1 dB                      → pass / fail
-     4. Insert (rigid, stereo_78db_check, lr_balance_check) into the DB.
+        L/R delta  — record (L − R) in dB; no pass/fail check
+     4. Insert (rigid, stereo_78db_check, delta) into the DB.
      5. If failed: nudge the system volume so stereo lands on 78 dBSPL and
         repeat the tests. Up to 2 volume adjustments, then stop.
 """
@@ -61,13 +61,24 @@ RIG_CAL_DIR    = Path(__file__).resolve().parent / "rig_mic_calibration_file"
 WN_DURATION_S      = 6.0     # length of each white-noise burst (seconds)
 WN_WARMUP_S        = 1     # discard this much at the start of each recording
 SPL_TOLERANCE_DB   = 1.0     # stereo level must be within ±this of 78 dBSPL
-LR_BALANCE_TOL_DB  = 1.0     # L vs R level difference must be within this
 MAX_VOLUME_ADJUST  = 2       # number of volume nudges before giving up
 VOLUME_CENTER_TOL_DB = 1   # leave stereo this close to 78 dBSPL (final volume)
 # RMS of a full-scale (peak = 1.0) sine → defined as 0 dBFS.  This single
 # constant fixes the dBFS→dBSPL convention; if a calibrated reference SLM
 # reads a constant offset vs this script on first deployment, adjust here.
 FULL_SCALE_RMS     = 1.0 / np.sqrt(2.0)
+
+# Empirical absolute-anchor trim (dB) added to every white-noise SPL reading.
+# The WN_offset values in the cal file are built from the UMIK measurement, so
+# any fixed dBFS→dBSPL convention/sensitivity mismatch between the UMIK
+# sensitivity and white_noise_dbspl's full-scale-sine reference shows up as a
+# constant, channel-independent offset vs a calibrated SLM.  Measured value:
+# set this to (SLM_dBSPL − script_dBSPL), averaged over channels.
+#   e.g. SLM L/R/LR = 79.7/78.8/82.4, script = 75.68/74.94/78.40
+#        → mean offset ≈ +3.96 dB
+# Re-verify at a second volume to confirm it is level-independent; set back to
+# 0.0 if the root cause is fixed in load_calibration's sensitivity handling.
+WN_SPL_TRIM_DB     = 3.96
 
 # Daily auto-run
 DAILY_RUN_HOUR     = 2       # 02:00 local time
@@ -132,11 +143,20 @@ def prompt_rig_mic_cal(directory: str | Path = RIG_CAL_DIR) -> Optional[Path]:
 
 
 def rig_id_from_path(path: Path) -> str:
-    """Pull rig_id from filename '<rig_id>_mic_calibration.txt'."""
+    """Pull rig_id from filename '<rig_id>[_<stamp>]_mic_calibration.txt'.
+
+    calibrate_mic.py now writes non-overwriting, timestamped files named
+    '<rig_id>_YYYY_MM_DD_HH_MM_SS_mic_calibration.txt', so an optional
+    trailing timestamp is stripped here.  Legacy '<rig_id>_mic_calibration.txt'
+    files (no stamp) are unaffected.
+    """
     stem = path.name
     if not stem.endswith("_mic_calibration.txt"):
         raise ValueError(f"Unexpected cal filename: {path}")
-    return stem[:-len("_mic_calibration.txt")]
+    core = stem[:-len("_mic_calibration.txt")]
+    # Strip a trailing YYYY_MM_DD_HH_MM[_SS] timestamp if present.
+    core = re.sub(r"_\d{4}_\d{2}_\d{2}_\d{2}_\d{2}(?:_\d{2})?$", "", core)
+    return core
 
 
 def band_mean(freqs: np.ndarray, values: np.ndarray,
@@ -337,14 +357,38 @@ def measure_white_noise_spl(channel: str, rig_cal: dict,
                             output_idx: Optional[int],
                             input_idx: Optional[int],
                             fs: int, duration_s: float = WN_DURATION_S) -> float:
-    """Play+record white noise on `channel` and return its absolute dBSPL."""
+    """Play+record white noise on `channel` and return its absolute dBSPL.
+
+    Preferred path (when the cal file carries broadband WN offsets):
+        SPL = raw_dBFS_welch(rec) + WN_offset[channel]
+    Both terms use the same Welch/full-scale-sine convention that
+    calibrate_mic.py used to derive WN_offset, so the result is self-consistent
+    for white noise (including the incoherent L+R addition on the LR channel)
+    and matches an SLM/MATLAB ground-truth reading.
+
+    Fallback path (legacy cal files with no WN offsets):
+        apply the per-frequency sweep offsets per FFT bin.  This is anchored to
+        the ESS-deconvolution's 0 dB, NOT the Welch convention, so it generally
+        reads a near-constant offset low for white noise and mis-scales LR.
+    """
     rec = play_and_record_white_noise(channel, duration_s, fs,
                                       output_idx, input_idx)
     warm = int(WN_WARMUP_S * fs)
     if rec.size > warm:
         rec = rec[warm:]
+
+    wn = rig_cal.get("wn")
+    if wn is not None and np.isfinite(wn.get(channel, np.nan)):
+        # Broadband dBFS over the same band WN_offset was measured on, then
+        # add the per-channel offset (volume-invariant dBFS→dBSPL conversion).
+        zero_f = np.array([0.0, fs / 2.0])
+        zero_v = np.array([0.0, 0.0])
+        dbfs = white_noise_dbspl(rec, fs, zero_f, zero_v, TARGET_BAND_HZ)
+        return dbfs + wn[channel] + WN_SPL_TRIM_DB
+
+    # Legacy fallback: per-frequency sweep offsets (convention-mismatched).
     return white_noise_dbspl(rec, fs, rig_cal["freqs"], rig_cal[channel],
-                             TARGET_BAND_HZ)
+                             TARGET_BAND_HZ) + WN_SPL_TRIM_DB
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -358,11 +402,14 @@ def check_stereo_78db(stereo_spl: float,
     return bool(np.isfinite(stereo_spl) and abs(stereo_spl - target) <= tol)
 
 
-def check_lr_balance(l_spl: float, r_spl: float,
-                     tol: float = LR_BALANCE_TOL_DB) -> bool:
-    """True if the L vs R white-noise levels differ by no more than tol."""
-    return bool(np.isfinite(l_spl) and np.isfinite(r_spl)
-                and abs(l_spl - r_spl) <= tol)
+def lr_delta_db(l_spl: float, r_spl: float) -> float:
+    """Signed L/R level difference in dB (L − R); NaN if either is non-finite.
+
+    Recorded as-is — there is no longer a pass/fail tolerance on L/R balance.
+    """
+    if not (np.isfinite(l_spl) and np.isfinite(r_spl)):
+        return float("nan")
+    return float(l_spl - r_spl)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -371,8 +418,14 @@ def check_lr_balance(l_spl: float, r_spl: float,
 
 def insert_calibration_result(rigid: Optional[int],
                               stereo_78db_check: bool,
-                              lr_balance_check: bool) -> bool:
-    """Insert one test outcome into test.sound_calibration. Non-fatal."""
+                              lr_balance_delta: float,
+                              volume: Optional[float]) -> bool:
+    """Insert one test outcome into test.sound_calibration. Non-fatal.
+
+    `lr_balance_delta` is the signed L/R level difference (L − R) in dB; a
+    non-finite value is stored as SQL NULL.  `volume` is the absolute system
+    volume (%) the round was measured at; None is stored as SQL NULL.
+    """
     if rigid is None:
         print("⚠  No rigid available; skipping DB insert.")
         return False
@@ -397,19 +450,26 @@ def insert_calibration_result(rigid: Optional[int],
         INSERT INTO sound_calibration (
             rigid,
             stereo_78db_check,
-            lr_balance_check
+            lr_balance_delta,
+            volume
         )
-        VALUES (%s, %s, %s)
+        VALUES (%s, %s, %s, %s)
         """
+        delta_val = float(lr_balance_delta) if np.isfinite(lr_balance_delta) else None
+        vol_val = float(volume) if (volume is not None and np.isfinite(volume)) else None
         cur.execute(sql, (int(rigid),
                           bool(stereo_78db_check),
-                          bool(lr_balance_check)))
+                          delta_val,
+                          vol_val))
         con.commit()
         rowid = cur.lastrowid
         cur.close()
         con.close()
+        delta_str = f"{delta_val:+.2f}" if delta_val is not None else "NULL"
+        vol_str = f"{vol_val:.0f}%" if vol_val is not None else "NULL"
         print(f"   🗄  DB insert ok (row {rowid}): "
-              f"rigid={rigid} stereo={stereo_78db_check} lr={lr_balance_check}")
+              f"rigid={rigid} stereo={stereo_78db_check} "
+              f"delta={delta_str} volume={vol_str}")
         return True
     except Exception as e:
         print(f"   ⚠  DB insert failed (non-fatal): {e}")
@@ -423,15 +483,17 @@ def insert_calibration_result(rigid: Optional[int],
 def run_volume_calibration(rigid: Optional[int], rig_cal: dict,
                            output_idx: Optional[int], input_idx: Optional[int],
                            fs: int) -> bool:
-    """Run the two white-noise tests and leave the final volume at 78 dBSPL.
+    """Run the stereo white-noise test and leave the final volume at 78 dBSPL.
 
-    Each round inserts (rigid, stereo_78db_check, lr_balance_check) into the DB
-    (stereo pass = within ±SPL_TOLERANCE_DB of 78; lr pass = |L−R| ≤ tol).
-    The system volume is then trimmed until stereo white-noise playback sits on
-    78 dBSPL (within VOLUME_CENTER_TOL_DB).  Up to MAX_VOLUME_ADJUST nudges are
-    used; after that the closest achieved level is kept.  L/R balance is logged
-    but does not drive the adjustment — master volume scales both channels and
-    cannot correct an imbalance.  Returns True if the final round passed both.
+    Each round inserts (rigid, stereo_78db_check, delta) into the DB, where
+    stereo pass = within ±SPL_TOLERANCE_DB of 78 and `delta` is the signed
+    L/R level difference (L − R) in dB — recorded as data, with no pass/fail
+    on it.  The system volume is then trimmed until stereo white-noise
+    playback sits on 78 dBSPL (within VOLUME_CENTER_TOL_DB).  Up to
+    MAX_VOLUME_ADJUST nudges are used; after that the closest achieved level
+    is kept.  The L/R delta is logged but does not drive the adjustment —
+    master volume scales both channels and cannot correct an imbalance.
+    Returns True if the final round's stereo level passed.
     """
     print("\n" + "─" * 65)
     print("White-noise volume calibration")
@@ -440,6 +502,8 @@ def run_volume_calibration(rigid: Optional[int], rig_cal: dict,
     adjustments = 0
     while True:
         print(f"\n▶ Test round (adjustments so far: {adjustments})")
+        # Absolute system volume these measurements are taken at (logged to DB).
+        cur_volume = get_system_volume_percent()
         print("\n Measuring: Stereo (L+R)")
         stereo_spl = measure_white_noise_spl("LR", rig_cal,
                                             output_idx, input_idx, fs)
@@ -453,19 +517,18 @@ def run_volume_calibration(rigid: Optional[int], rig_cal: dict,
                                         output_idx, input_idx, fs)
 
         stereo_pass = check_stereo_78db(stereo_spl)
-        lr_pass = check_lr_balance(l_spl, r_spl)
+        lr_delta = lr_delta_db(l_spl, r_spl)
 
         print(f"   Stereo (L+R) : {stereo_spl:6.2f} dBSPL   "
               f"(target {TARGET_SPL_DB:.0f} ±{SPL_TOLERANCE_DB:.0f})  → "
               f"{'PASS ✅' if stereo_pass else 'FAIL ❌'}")
         print(f"   L            : {l_spl:6.2f} dBSPL")
         print(f"   R            : {r_spl:6.2f} dBSPL")
-        print(f"   |L − R|      : {abs(l_spl - r_spl):6.2f} dB        "
-              f"(max {LR_BALANCE_TOL_DB:.0f})        → "
-              f"{'PASS ✅' if lr_pass else 'FAIL ❌'}")
+        print(f"   delta (L − R): {lr_delta:+6.2f} dB        "
+              f"(recorded to DB; no pass/fail)")
 
-        # Log this round's outcome.
-        insert_calibration_result(rigid, stereo_pass, lr_pass)
+        # Log this round's outcome (stereo pass + signed L/R delta).
+        insert_calibration_result(rigid, stereo_pass, lr_delta, cur_volume)
 
         if not np.isfinite(stereo_spl):
             print("⚠  Stereo SPL not finite; cannot set volume to target.")
@@ -475,16 +538,16 @@ def run_volume_calibration(rigid: Optional[int], rig_cal: dict,
         if abs(stereo_spl - TARGET_SPL_DB) <= VOLUME_CENTER_TOL_DB:
             print(f"\n✅ Final volume set: stereo at {stereo_spl:.2f} dBSPL "
                   f"(target {TARGET_SPL_DB:.0f}).")
-            if not lr_pass:
-                print("⚠  L/R balance still out of spec — not correctable via "
-                      "master volume (check routing / per-speaker levels).")
-            return stereo_pass and lr_pass
+            print("ℹ  L/R delta is recorded only; master volume scales both "
+                  "channels and cannot correct an imbalance (check routing / "
+                  "per-speaker levels if it is large).")
+            return stereo_pass
 
         if adjustments >= MAX_VOLUME_ADJUST:
             print(f"\n⏹  Stereo at {stereo_spl:.2f} dBSPL after "
                   f"{MAX_VOLUME_ADJUST} adjustment(s); closest to "
                   f"{TARGET_SPL_DB:.0f} achievable for now.")
-            return stereo_pass and lr_pass
+            return stereo_pass
 
         # Trim volume so the next stereo measurement lands on 78 dBSPL.
         if adjust_volume_for_target(stereo_spl, TARGET_SPL_DB):
@@ -662,9 +725,34 @@ def main() -> int:
 
     freqs_cal, off_L, off_R, off_LR, meta = scu.read_rig_mic_cal(cal_path)
     rig_cal = {"freqs": freqs_cal, "L": off_L, "R": off_R, "LR": off_LR}
+
+    # Broadband white-noise offsets (WN_offset_L/R/LR), if the cal file has
+    # them. These give an SLM-accurate white-noise level via
+    #   SPL = raw_dBFS_welch + WN_offset[ch]
+    # and are preferred over the per-frequency sweep offsets, which are
+    # anchored to a different (ESS-deconvolution) dBFS convention.
+    wn = {}
+    for ch in scu.CHANNELS:
+        v = meta.get(f"WN_offset_{ch}")
+        if v is not None:
+            try:
+                wn[ch] = float(v)
+            except ValueError:
+                pass
+    rig_cal["wn"] = wn if wn else None
+
     if meta:
         print(f"   Generated: {meta.get('Calibration date', '?')}")
         print(f"   Reference: {meta.get('Reference UMIK cal', '?')}")
+    if rig_cal["wn"]:
+        print("   White-noise level path: broadband WN_offset "
+              f"(L/R/LR = {wn.get('L', float('nan')):+.2f}/"
+              f"{wn.get('R', float('nan')):+.2f}/"
+              f"{wn.get('LR', float('nan')):+.2f} dB)")
+    else:
+        print("   ⚠  White-noise level path: legacy per-frequency offsets "
+              "(no WN_offset_* in cal file — re-run calibrate_mic.py to add "
+              "them; white-noise SPL may read low).")
 
     # rigid (for DB logging) comes from the system hostname.
     rigid = get_rig_id_from_system()

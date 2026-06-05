@@ -18,8 +18,13 @@ Workflow:
   3. Sweep L / R / L+R through the CALIBRATED mic   → dBSPL curves
   4. Sweep L / R / L+R through the UNCALIBRATED mic → raw dBFS curves
   5. Per channel:  offset(f) = SPL_ref(f) − dBFS_test(f)
-  6. Write  rig_mic_calibration_file/<rig_id>_mic_calibration.txt
-      (f, off_L, off_R, off_LR)
+  6. White noise L / R / L+R through BOTH mics (reusing calibrate_speaker's
+     generator):  WN_offset = UMIK_dBSPL − raw_dBFS  (one broadband scalar
+     per channel)
+  7. Write  rig_mic_calibration_file/<rig_id>_<timestamp>_mic_calibration.txt
+      (per-freq f, off_L, off_R, off_LR  +  three WN_offset header lines).
+      A timestamp is embedded so each run adds a NEW file rather than
+      overwriting the previous calibration.
 
 The offset absorbs the sweep level, UMIK sensitivity, and the test mic's
 frequency response, so downstream the user just does:
@@ -34,6 +39,17 @@ from pathlib import Path
 import numpy as np
 
 import sound_calibration_utility as scu
+
+# White-noise reuse: pull the *exact* generator + playback/level helpers used
+# by calibrate_speaker.py so the mic-cal white-noise bursts are identical
+# (0.5 amplitude, independent L/R draws, same band-summed dBFS→dBSPL maths).
+from test2_speaker import (
+    play_and_record_white_noise,
+    white_noise_dbspl,
+    WN_DURATION_S,
+    WN_WARMUP_S,
+    TARGET_BAND_HZ,
+)
 
 
 def main() -> int:
@@ -92,7 +108,7 @@ def main() -> int:
 
     # ── 4. Sweep with calibrated mic (mic_cal applied → dBSPL) ───────────
     print("\n" + "─" * 65)
-    print("Phase 1/2 — sweeping through CALIBRATED mic …")
+    print("Phase 1/3 — sweeping through CALIBRATED mic …")
     print("─" * 65)
     ref_results = scu.measure_all_channels(output_idx, cal_idx,
                                            mic_cal=ref_cal,
@@ -100,7 +116,7 @@ def main() -> int:
 
     # ── 5. Sweep with uncalibrated mic (mic_cal=None → raw dBFS) ─────────
     print("\n" + "─" * 65)
-    print("Phase 2/2 — sweeping through UNCALIBRATED mic …")
+    print("Phase 2/3 — sweeping through UNCALIBRATED mic …")
     print("─" * 65)
     test_results = scu.measure_all_channels(output_idx, test_idx,
                                             mic_cal=None,
@@ -136,14 +152,69 @@ def main() -> int:
         print("   ⚠  Large spread — check both mics are firmly mounted and "
               "the room was quiet during the sweeps.")
 
+    # ── 7b. White-noise broadband offsets (both mics) ────────────────────
+    #     For each channel, play+record white noise on the CALIBRATED mic
+    #     (→ absolute dBSPL via the UMIK correction) and on the UNCALIBRATED
+    #     mic (→ raw dBFS), then:
+    #         WN_offset = UMIK_dBSPL − raw_dBFS
+    #     One broadband (energy-summed) scalar per channel, mirroring the
+    #     per-frequency relation  SPL = dBFS_raw + offset.
+    print("\n" + "─" * 65)
+    print("Phase 3/3 — white-noise bursts (calibrated then uncalibrated mic) …")
+    print("─" * 65)
+
+    fs = scu.SAMPLE_RATE
+    # UMIK correction expressed as a dBFS→dBSPL offset per bin:
+    #   dBSPL_bin = dBFS_bin − cal_db(f) + sensitivity   (matches measure_channel)
+    cal_f, cal_db, cal_sens = ref_cal
+    umik_off_f = np.asarray(cal_f, dtype=float)
+    umik_off_v = -np.asarray(cal_db, dtype=float) + cal_sens
+    # Zero offset → white_noise_dbspl returns plain band-summed dBFS.
+    zero_off_f = np.array([0.0, fs / 2.0])
+    zero_off_v = np.array([0.0, 0.0])
+    warm = int(WN_WARMUP_S * fs)
+
+    wn_offsets = {}
+    for ch in scu.CHANNELS:
+        print(f"\n   Channel {ch} ({scu.CH_PRETTY[ch]}):")
+
+        print("     • calibrated mic (→ dBSPL) …")
+        rec_cal = play_and_record_white_noise(
+            ch, WN_DURATION_S, fs, output_idx, cal_idx)
+        if rec_cal.size > warm:
+            rec_cal = rec_cal[warm:]
+        wn_dbspl = white_noise_dbspl(rec_cal, fs,
+                                     umik_off_f, umik_off_v, TARGET_BAND_HZ)
+
+        print("     • uncalibrated mic (→ dBFS) …")
+        rec_test = play_and_record_white_noise(
+            ch, WN_DURATION_S, fs, output_idx, test_idx)
+        if rec_test.size > warm:
+            rec_test = rec_test[warm:]
+        wn_dbfs = white_noise_dbspl(rec_test, fs,
+                                    zero_off_f, zero_off_v, TARGET_BAND_HZ)
+
+        wn_offsets[ch] = wn_dbspl - wn_dbfs
+        print(f"     UMIK {wn_dbspl:7.2f} dBSPL  −  raw {wn_dbfs:7.2f} dBFS  "
+              f"→  WN offset {wn_offsets[ch]:+.3f} dB")
+
     # ── 8. Write cal file to rig_mic_calibration_file/ ──────────────────
+    #     Timestamped filename so each run ADDS a new file rather than
+    #     overwriting the previous calibration. calibrate_speaker.py discovers
+    #     these via the '*_mic_calibration.txt' glob and strips the timestamp
+    #     when recovering the rig_id.
     out_dir = Path(__file__).resolve().parent / "rig_mic_calibration_file"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{rig_id}_mic_calibration.txt"
+    stamp = _dt.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+    out_path = out_dir / f"{rig_id}_{stamp}_mic_calibration.txt"
     scu.write_rig_mic_cal(out_path, rig_id, freqs,
                           offsets["L"], offsets["R"], offsets["LR"],
-                          ref_cal_file=str(umik_path))
+                          ref_cal_file=str(umik_path),
+                          wn_offsets=wn_offsets)
     print(f"\n✅ Mic calibration written → {out_path}")
+    print(f"   White-noise offsets  L/R/LR: "
+          f"{wn_offsets['L']:+.3f} / {wn_offsets['R']:+.3f} / "
+          f"{wn_offsets['LR']:+.3f} dB")
     print(f"   Calibration timestamp: {_dt.datetime.now():%Y-%m-%d %H:%M:%S}")
     return 0
 

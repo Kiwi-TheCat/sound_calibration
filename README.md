@@ -5,51 +5,51 @@
 
 ### Clone the Repository
 
-- Download the project from Gitlab
+Download the project from Gitlab
 ```
 cd ~/repos
 ```
 ```
 git clone https://gitlab.com/sainsbury-wellcome-centre/delab/techdev/ultrasound-recording-module.git
 ```
-- Enter the project directory 
+Enter the project directory 
 ```
 cd ~/repos/ultrasound-recording-module/sound_calibration
 ```
 ### Install pyenv
-- Update your package lists, password required
+Update your package lists, password required
 ```
 sudo apt update
 ```
--  Install the required build dependencies:
+Install the required build dependencies:
 ```
 sudo apt install -y make build-essential libssl-dev zlib1g-dev \
 libbz2-dev libreadline-dev libsqlite3-dev wget curl llvm libncurses5-dev \
 libncursesw5-dev xz-utils tk-dev libffi-dev liblzma-dev python3-openssl git
 ```
-- Run curl command to downlad pyenv
+Run curl command to downlad pyenv
 ```
 curl -fsSL https://pyenv.run | bash
 ```
-- Configure Your Shell Environment
-- Run these commands one by one in terminal
+Configure Your Shell Environment
+Run these commands one by one in terminal
 ```
 echo 'export PYENV_ROOT="$HOME/.pyenv"' >> ~/.bashrc
 echo 'command -v pyenv >/dev/null || export PATH="$PYENV_ROOT/bin:$PATH"' >> ~/.bashrc
 echo 'eval "$(pyenv init -)"' >> ~/.bashrc
 echo 'eval "$(pyenv virtualenv-init -)"' >> ~/.bashrc
 ```
-- Reload shell
+Reload shell
 ```
 source ~/.bashrc
 ```
-- Verify installation, expect pyenv 2.x.x
+Verify installation, expect pyenv 2.x.x
 ```
 pyenv --version
 ```
 
 ### Install python
-- Install specific version
+Install specific version
 ```
 pyenv install 3.12.4
 ```
@@ -58,11 +58,11 @@ pyenv local 3.12.4
 ```
 
 ### Virtual Environment
-- Create virtual environment
+Create virtual environment
 ```
 python3 -m venv venv
 ```
-- Activate the environment, expect (venv)....:/repos/ultrasound../
+Activate the environment, expect (venv)....:/repos/ultrasound../
 ```
 source venv/bin/activate
 ```
@@ -80,7 +80,7 @@ pip install -r requirements.txt
 - The UMIK calibration file in sample_data/7101790.txt.
 - The standard sweep in sample_data/256k…mono.wav.
 
-### Run the Program
+## Run the Program
 
 #### First run this code:
 ```
@@ -93,12 +93,13 @@ python3 calibrate_mic.py
    - Uncalibrated rig mic = [13] USB: Audio (hw:2,0)
 3. Wait for the program to run
 
-#### Then run this:
+#### Then run this immediately after:
 ```
 python3 calibrate_speaker.py
 ```
-1. Enter rig mic cal file, select the one according to the rig ID by enter the number in[], e.g. [0]
+1. Enter rig mic cal file, select the one according to the rig ID by enter the number in[], e.g. [0] will be the newest file
 2. Select audio devices
    - Speaker device = [12] USB PnP Sound Device: Audio (hw:1,0)
    - Rig mic = [13] USB: Audio (hw:2,0)
-3. Wait for the program to run, nothing needs to be done at this stage
+3. Wait for the program to run
+4. The app will re-runs that cycle automatically at 02:00 every day (no further user input required)

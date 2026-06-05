@@ -132,11 +132,19 @@ def write_rig_mic_cal(path: Path,
                       off_L:  np.ndarray,
                       off_R:  np.ndarray,
                       off_LR: np.ndarray,
-                      ref_cal_file: str) -> None:
+                      ref_cal_file: str,
+                      wn_offsets: Optional[dict] = None) -> None:
     """Write the per-channel per-frequency calibration for the rig's test mic.
 
     Relation when applied:  SPL(f) = dBFS_raw(f) + offset(f)
     (the offset absorbs the sweep level + UMIK sensitivity).
+
+    `wn_offsets`, when given, is a dict {'L', 'R', 'LR'} of broadband
+    white-noise offsets (single dB scalars per channel,
+    SPL = dBFS_raw + offset, energy-summed over the measurement band).
+    These are emitted as three extra comment lines that read_rig_mic_cal()
+    recovers into its `meta` dict (keys WN_offset_L / _R / _LR) without
+    disturbing the per-frequency data grid.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     now = _dt.datetime.now().isoformat(timespec="seconds")
@@ -147,6 +155,12 @@ def write_rig_mic_cal(path: Path,
         f.write(f"# Reference UMIK cal: {ref_cal_file}\n")
         f.write(f"# Smoothing: 1/{SMOOTHING_OCT}-octave\n")
         f.write("# Relation: SPL_dB(f) = dBFS_raw(f) + offset(f)\n")
+        if wn_offsets is not None:
+            f.write("# White-noise broadband offsets "
+                    "(SPL_dB = dBFS_raw + offset), energy-summed over band:\n")
+            f.write(f"# WN_offset_L: {wn_offsets['L']:.4f}\n")
+            f.write(f"# WN_offset_R: {wn_offsets['R']:.4f}\n")
+            f.write(f"# WN_offset_LR: {wn_offsets['LR']:.4f}\n")
         f.write("# Columns: frequency_Hz\toffset_L_dB\toffset_R_dB\toffset_LR_dB\n")
         for fr, lL, lR, lLR in zip(freqs, off_L, off_R, off_LR):
             if np.isfinite(lL) and np.isfinite(lR) and np.isfinite(lLR):
