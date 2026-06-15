@@ -43,7 +43,7 @@ import sound_calibration_utility as scu
 # White-noise reuse: pull the *exact* generator + playback/level helpers used
 # by calibrate_speaker.py so the mic-cal white-noise bursts are identical
 # (0.5 amplitude, independent L/R draws, same band-summed dBFS→dBSPL maths).
-from test2_speaker import (
+from calibrate_speaker import (
     play_and_record_white_noise,
     white_noise_dbspl,
     WN_DURATION_S,
@@ -69,6 +69,18 @@ def main() -> int:
     if not scu.HAS_SD:
         print("❌ sounddevice unavailable.")
         return 1
+
+    # Ensure EVERY mic input is at full level (and unmuted) before measuring,
+    # so neither the calibrated nor the uncalibrated rig mic — which usually
+    # aren't the system default source — sneaks through muted or attenuated.
+    n_set = scu.set_all_input_volumes(1.0)
+    if n_set:
+        print(f"🔊 Set {n_set} mic input source(s) to 100% and unmuted them.")
+    elif scu.set_system_input_volume(1.0):
+        # Fallback: default source only (e.g. non-Linux / no pactl source list).
+        print("🔊 Set default mic input level to 100% and unmuted it.")
+    else:
+        print("⚠  Could not set mic input level to 100%.")
 
     # ── 2. Pick output + the two mics ────────────────────────────────────
     scu.list_audio_devices()

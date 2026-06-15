@@ -14,7 +14,7 @@ Pre-requisites:
   • The standard sweep in sample_data/256k…mono.wav.
   • PulseAudio / PipeWire `pactl` available (Ubuntu) for volume control.
   • ~/.dbconf with a [client] section (host/user/passwd/port) for DB logging.
-ß
+
 One calibration cycle:
   A) Sweep measurement with per-channel offsets (existing code, adapted from calibrate_mic.py):
      1. Build inverse filter, sweep L / R / L+R, apply per-channel offsets.
@@ -50,7 +50,7 @@ import sound_calibration_utility as scu
 
 # ── Tunables ─────────────────────────────────────────────────────────────
 TARGET_SPL_DB  = 78.0
-TARGET_BAND_HZ = (1, 20_000.0)
+TARGET_BAND_HZ = (1.0, 24_000.0)
 RSYNC_DEST     = "ogma:speaker_calibration/"   # adjust per deployment
 
 # Directory holding the rig mic-calibration .txt files (written by
@@ -58,7 +58,7 @@ RSYNC_DEST     = "ogma:speaker_calibration/"   # adjust per deployment
 RIG_CAL_DIR    = Path(__file__).resolve().parent / "rig_mic_calibration_file"
 
 # White-noise volume calibration
-WN_DURATION_S      = 6.0     # length of each white-noise burst (seconds)
+WN_DURATION_S      = 7.0     # length of each white-noise burst (seconds)
 WN_WARMUP_S        = 1     # discard this much at the start of each recording
 SPL_TOLERANCE_DB   = 1.0     # stereo level must be within ±this of 78 dBSPL
 MAX_VOLUME_ADJUST  = 2       # number of volume nudges before giving up
@@ -78,7 +78,7 @@ FULL_SCALE_RMS     = 1.0 / np.sqrt(2.0)
 #        → mean offset ≈ +3.96 dB
 # Re-verify at a second volume to confirm it is level-independent; set back to
 # 0.0 if the root cause is fixed in load_calibration's sensitivity handling.
-WN_SPL_TRIM_DB     = 3.96
+#WN_SPL_TRIM_DB     = 3.96
 
 # Daily auto-run
 DAILY_RUN_HOUR     = 2       # 02:00 local time
@@ -384,11 +384,14 @@ def measure_white_noise_spl(channel: str, rig_cal: dict,
         zero_f = np.array([0.0, fs / 2.0])
         zero_v = np.array([0.0, 0.0])
         dbfs = white_noise_dbspl(rec, fs, zero_f, zero_v, TARGET_BAND_HZ)
-        return dbfs + wn[channel] + WN_SPL_TRIM_DB
+        # Temporarily disable the global trim adjustment
+        return dbfs + wn[channel]  # + WN_SPL_TRIM_DB
 
     # Legacy fallback: per-frequency sweep offsets (convention-mismatched).
+    # Legacy fallback: per-frequency sweep offsets (convention-mismatched).
+    # Temporarily disable the global trim adjustment
     return white_noise_dbspl(rec, fs, rig_cal["freqs"], rig_cal[channel],
-                             TARGET_BAND_HZ) + WN_SPL_TRIM_DB
+                             TARGET_BAND_HZ)  # + WN_SPL_TRIM_DB
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -442,7 +445,7 @@ def insert_calibration_result(rigid: Optional[int],
             host=cfg["host"],
             user=cfg["user"],
             password=cfg["passwd"],
-            database="met",
+            database="test",
             port=int(cfg.get("port", 3306)),
         )
         cur = con.cursor()

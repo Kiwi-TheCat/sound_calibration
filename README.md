@@ -56,17 +56,25 @@ pyenv install 3.12.4
 ```
 pyenv local 3.12.4
 ```
+To confirm if python as been installed and to the correct version
+```
+python3 --version
+```
 
 ### Virtual Environment
 Create virtual environment
 ```
 python3 -m venv venv
 ```
-Activate the environment, expect (venv)....:/repos/ultrasound../
+Activate the environment, expect (venv) delab@....:/repos/ultrasound../
 ```
 source venv/bin/activate
 ```
 ### Install Python Dependencies
+Go to the project folder
+```
+cd speaker_calibration
+```
 ```
 pip install -r requirements.txt
 ```
@@ -74,8 +82,7 @@ pip install -r requirements.txt
 ### Before running the program
 
 #### Setup expected before running:
--  A calibrated USB mic (e.g. UMIK-1) in the inner box in front of the
-- pokewall, between the two speakers.
+-  A calibrated USB mic (e.g. UMIK-1) in the inner box in front of the pokewall, between the two speakers.
 - The uncalibrated rig mic (camera mic) in its fixed location.
 - The UMIK calibration file in sample_data/7101790.txt.
 - The standard sweep in sample_data/256k…mono.wav.
@@ -99,7 +106,12 @@ python3 calibrate_speaker.py
 ```
 1. Enter rig mic cal file, select the one according to the rig ID by enter the number in[], e.g. [0] will be the newest file
 2. Select audio devices
-   - Speaker device = [12] USB PnP Sound Device: Audio (hw:1,0)
-   - Rig mic = [13] USB: Audio (hw:2,0)
+   - Speaker device =  USB PnP Sound Device: Audio (hw:1,0)
+   - Rig mic =  USB: Audio (hw:2,0)
 3. Wait for the program to run
 4. The app will re-runs that cycle automatically at 02:00 every day (no further user input required)
+
+python3 
+import sounddevice as sd
+sd.query_devices()
+exit()

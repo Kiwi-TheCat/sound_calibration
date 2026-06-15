@@ -249,6 +249,73 @@ def set_system_volume(fraction: float) -> bool:
     return False
 
 
+def get_system_input_volume() -> Optional[float]:
+    """Read the default input/source volume as a fraction (1.0 = 100%)."""
+    if platform.system() != "Linux":
+        return None
+    if shutil.which("pacmd"):
+        r = subprocess.run(
+            r'pacmd list-sources | grep -A 15 "\* index" | grep -m 1 "volume:"',
+            shell=True, capture_output=True, text=True, check=False)
+        m = re.search(r"/\s*(\d+)%", r.stdout)
+        if m:
+            return int(m.group(1)) / 100.0
+    if shutil.which("pactl"):
+        r = _run(["pactl", "get-source-volume", "@DEFAULT_SOURCE@"])
+        m = re.search(r"(\d+)%", r.stdout)
+        if m:
+            return int(m.group(1)) / 100.0
+    return None
+
+
+def set_system_input_volume(fraction: float, unmute: bool = True) -> bool:
+    """Set the default input/source volume to `fraction` (1.0 = 100%).
+
+    When `unmute` is True the default source is also unmuted, so a muted mic
+    can't silently sail through while reporting "100%".
+    """
+    if platform.system() != "Linux" or not shutil.which("pactl"):
+        return False
+    fraction = max(0.0, fraction)
+    pct = max(0, min(150, int(round(fraction * 100))))
+    ok = _run(["pactl", "set-source-volume",
+               "@DEFAULT_SOURCE@", f"{pct}%"]).returncode == 0
+    if unmute:
+        _run(["pactl", "set-source-mute", "@DEFAULT_SOURCE@", "0"])
+    return ok
+
+
+def set_all_input_volumes(fraction: float, unmute: bool = True) -> int:
+    """Set EVERY input source to `fraction` (1.0 = 100%), optionally unmuting.
+
+    Unlike set_system_input_volume() (which touches only @DEFAULT_SOURCE@),
+    this walks all sources reported by `pactl list short sources`. The rig's
+    calibrated and uncalibrated mics are picked by device index and usually
+    aren't the system default, so setting every source guarantees both are at
+    full level — and unmuting prevents a silently-muted mic from corrupting a
+    measurement. Returns the number of sources successfully set.
+    """
+    if platform.system() != "Linux" or not shutil.which("pactl"):
+        return 0
+    fraction = max(0.0, fraction)
+    pct = max(0, min(150, int(round(fraction * 100))))
+    listed = _run(["pactl", "list", "short", "sources"])
+    if listed.returncode != 0:
+        return 0
+    n_ok = 0
+    for line in listed.stdout.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        src = parts[0]                       # numeric source index
+        if _run(["pactl", "set-source-volume",
+                 src, f"{pct}%"]).returncode == 0:
+            if unmute:
+                _run(["pactl", "set-source-mute", src, "0"])
+            n_ok += 1
+    return n_ok
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  OPEN FILE IN OS DEFAULT VIEWER
 # ═══════════════════════════════════════════════════════════════════════════

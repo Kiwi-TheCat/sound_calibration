@@ -226,7 +226,7 @@ def resample_to_log_grid(freqs_lin, mag_db_lin,
 # ═══════════════════════════════════════════════════════════════════════════
 
 def load_calibration(cal_file: Path):
-    """Parse a UMIK-1/miniDSP calibration file.
+    """Parse a UMIK-1/miniDSP calibration file using exact REW anchor math.
 
     Returns (cal_freqs, cal_db, sensitivity_offset).
     sensitivity_offset is None if the header cannot be parsed.
@@ -242,8 +242,9 @@ def load_calibration(cal_file: Path):
                 if not line:
                     continue
                 if sens_factor is None:
-                    m_s = re.search(r'Sens\s+Factor\s*=\s*([\d.]+)\s*dB', line, re.I)
-                    m_g = re.search(r'AGain\s*=\s*([\d.]+)\s*dB',         line, re.I)
+                    # FIXED REGEX: Added [+-]? to capture negative values
+                    m_s = re.search(r'Sens\s+Factor\s*=\s*([+-]?[\d.]+)\s*dB', line, re.I)
+                    m_g = re.search(r'AGain\s*=\s*([+-]?[\d.]+)\s*dB',         line, re.I)
                     if m_s and m_g:
                         sens_factor = float(m_s.group(1))
                         again       = float(m_g.group(1))
@@ -269,8 +270,21 @@ def load_calibration(cal_file: Path):
     cal_freqs = arr[idx, 0]
     cal_db    = arr[idx, 1]
 
-    if sens_factor is not None and again is not None:
-        sensitivity_offset = UMIK1_BASE_SENSITIVITY - sens_factor + again
+    if sens_factor is not None:
+        # FIXED MATH: 124 dB anchor - 3.0103 dB AES17 shift - Sens_Factor
+        # (AGain is already baked into the 124 dB standard via OS Volume rules)
+
+        ## [second fix] ABSOLUTE SPL PHYSICS MATH (Matching REW's internal engine)
+        # REW UMIK-1 Anchor is natively 127.01 dB.
+        # Because Python's Sine-wave FFT reads exactly 3.0103 dB higher 
+        # than REW's Square-wave AES17 FFT, we use an exact 124.0 anchor 
+        # to perfectly balance the equation (124.0 + 3.0103 = 127.01).
+        # (Note: REW ignores AGain entirely, relying solely on Sens_Factor).
+        # The Math: -3.01 + 127.01 = 124.0 dBSPL
+        
+
+        ## [third fix]# The Math: 124.0 (Square Wave limit) - 3.0103 (Sine Wave shift)
+        sensitivity_offset = 124.0 - 3.0103 - sens_factor
         print(f"📐  Sensitivity offset: {sensitivity_offset:.3f} dB  "
               f"(0 dBFS → {sensitivity_offset:.1f} dBSPL)")
     else:
@@ -283,6 +297,7 @@ def load_calibration(cal_file: Path):
           f"(range {cal_db.min():.2f}–{cal_db.max():.2f} dB)")
 
     return cal_freqs, cal_db, sensitivity_offset
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════
