@@ -271,20 +271,19 @@ def load_calibration(cal_file: Path):
     cal_db    = arr[idx, 1]
 
     if sens_factor is not None:
-        # FIXED MATH: 124 dB anchor - 3.0103 dB AES17 shift - Sens_Factor
-        # (AGain is already baked into the 124 dB standard via OS Volume rules)
-
-        ## [second fix] ABSOLUTE SPL PHYSICS MATH (Matching REW's internal engine)
-        # REW UMIK-1 Anchor is natively 127.01 dB.
-        # Because Python's Sine-wave FFT reads exactly 3.0103 dB higher 
-        # than REW's Square-wave AES17 FFT, we use an exact 124.0 anchor 
-        # to perfectly balance the equation (124.0 + 3.0103 = 127.01).
-        # (Note: REW ignores AGain entirely, relying solely on Sens_Factor).
-        # The Math: -3.01 + 127.01 = 124.0 dBSPL
-        
-
-        ## [third fix]# The Math: 124.0 (Square Wave limit) - 3.0103 (Sine Wave shift)
-        sensitivity_offset = 124.0 - 3.0103 - sens_factor
+        # REW-compatible UMIK-1 absolute SPL offset for this code path.
+        #
+        # REW author formula:
+        #     offset = 94 + 24 - SensFactor + 6
+        #
+        # The +6 dB term depends on dBFS convention and FFT scaling.
+        # In this code, white_noise_dbspl() already uses RMS bin power from Welch
+        # and defines 0 dBFS using FULL_SCALE_RMS = 1/sqrt(2), i.e.
+        # "full-scale sine RMS is 0 dBFS".
+        #
+        # Therefore one 3.0103 dB sine-RMS convention shift is already accounted for,
+        # so we remove it from the REW +6 dB anchor.
+        sensitivity_offset = 94.0 + 24.0 - sens_factor + 6.0 - 3.0103
         print(f"📐  Sensitivity offset: {sensitivity_offset:.3f} dB  "
               f"(0 dBFS → {sensitivity_offset:.1f} dBSPL)")
     else:
